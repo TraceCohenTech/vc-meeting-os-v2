@@ -348,7 +348,7 @@ export async function POST(request: Request) {
       source: source || 'manual',
     }
 
-    if ((defaultFolder as { id: string } | null)?.id) {
+    if (defaultFolder && (defaultFolder as { id: string }).id) {
       memoInsertData.folder_id = (defaultFolder as { id: string }).id
     }
     if (companyId) {
