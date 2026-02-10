@@ -1,0 +1,35 @@
+{
+  "name": "web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@ai-sdk/groq": "^3.0.21",
+    "@supabase/ssr": "^0.8.0",
+    "@supabase/supabase-js": "^2.95.1",
+    "ai": "^6.0.72",
+    "googleapis": "^171.4.0",
+    "inngest": "^3.52.0",
+    "lucide-react": "^0.563.0",
+    "next": "14.2.35",
+    "react": "^18",
+    "react-dom": "^18",
+    "sonner": "^2.0.7",
+    "zustand": "^5.0.11"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "eslint": "^8",
+    "eslint-config-next": "14.2.35",
+    "postcss": "^8",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5"
+  }
+}
