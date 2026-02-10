@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import {
-  ingestTranscript,
   verifyWebhookSignature,
   parseFirefliesPayload,
 } from '@/lib/ingestion'
 import { createAdminClient } from '@/lib/supabase/server'
+import { processTranscriptToMemo } from '@/lib/processing'
 
 const FIREFLIES_WEBHOOK_SECRET = process.env.FIREFLIES_WEBHOOK_SECRET
 
@@ -90,33 +90,34 @@ export async function POST(
       )
     }
 
-    // Ingest the transcript
-    const result = await ingestTranscript(
-      {
-        source: 'fireflies',
-        transcriptId: payload.meetingId,
-        metadata: {
-          title: payload.transcript?.title || 'Fireflies Meeting',
-          date: payload.transcript?.date,
-          participants: payload.transcript?.participants,
-          duration: payload.transcript?.duration,
-          externalId: payload.meetingId,
-        },
+    // Process the transcript directly (not via queue)
+    console.log(`[Fireflies Webhook ${webhookId}] Processing transcript ${payload.meetingId} for user ${userId}`)
+
+    const result = await processTranscriptToMemo({
+      source: 'fireflies',
+      transcriptId: payload.meetingId,
+      userId,
+      metadata: {
+        title: payload.transcript?.title || 'Fireflies Meeting',
+        date: payload.transcript?.date,
+        participants: payload.transcript?.participants,
       },
-      userId
-    )
+    })
 
     if (!result.success) {
+      console.error(`[Fireflies Webhook ${webhookId}] Processing failed:`, result.error)
       return NextResponse.json(
         { error: result.error },
         { status: 500 }
       )
     }
 
+    console.log(`[Fireflies Webhook ${webhookId}] Created memo ${result.memoId}`)
+
     return NextResponse.json({
       success: true,
-      jobId: result.jobId,
-      message: 'Transcript queued for processing',
+      memoId: result.memoId,
+      companyName: result.companyName,
     })
   } catch (error) {
     console.error('Fireflies webhook error:', error)

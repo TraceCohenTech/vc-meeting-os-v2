@@ -15,6 +15,7 @@ export async function GET(
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
+    // Only select columns that exist in the memos table
     const { data: memo, error } = await (supabase
       .from('memos') as ReturnType<typeof supabase.from>)
       .select(`
@@ -23,8 +24,6 @@ export async function GET(
         summary,
         content,
         meeting_date,
-        meeting_type,
-        participants,
         tags,
         source,
         drive_file_id,

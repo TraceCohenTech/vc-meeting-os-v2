@@ -239,25 +239,44 @@ ${memoText}`,
       .eq('is_default', true)
       .single() as unknown as DbResult<{ id: string }>
 
-    // Create memo
+    // Create memo - only use verified fields that exist in the schema
+    // Note: source_id, participants, metadata do NOT exist in memos table
+    const memoInsertData: Record<string, unknown> = {
+      user_id: userId,
+      title: meetingTitle,
+      content: memoText,
+      summary: summaryGeneration.text,
+      source: job.source,
+    }
+
+    // Add optional fields only if they have values
+    if (defaultFolder?.id) {
+      memoInsertData.folder_id = defaultFolder.id
+    }
+    if (companyId) {
+      memoInsertData.company_id = companyId
+    }
+    // Convert meeting date to ISO format if it's a timestamp
+    if (meetingDate) {
+      try {
+        const dateNum = Number(meetingDate)
+        if (!isNaN(dateNum) && dateNum > 1000000000000) {
+          // Unix timestamp in ms
+          memoInsertData.meeting_date = new Date(dateNum).toISOString().split('T')[0]
+        } else if (meetingDate.includes('T') || meetingDate.includes('-')) {
+          // Already ISO format
+          memoInsertData.meeting_date = meetingDate.split('T')[0]
+        } else {
+          memoInsertData.meeting_date = new Date(meetingDate).toISOString().split('T')[0]
+        }
+      } catch {
+        console.error('[Direct] Invalid meeting date:', meetingDate)
+      }
+    }
+
     const { data: newMemo, error: memoError } = await (adminClient
       .from('memos') as ReturnType<typeof adminClient.from>)
-      .insert({
-        user_id: userId,
-        folder_id: defaultFolder?.id || null,
-        company_id: companyId,
-        source: job.source,
-        source_id: job.source_id || null,
-        title: meetingTitle,
-        content: memoText,
-        summary: summaryGeneration.text,
-        meeting_date: meetingDate,
-        participants: participants,
-        metadata: {
-          template_id: template.id,
-          meeting_type: meetingType,
-        },
-      } as never)
+      .insert(memoInsertData as never)
       .select('id')
       .single() as unknown as DbResult<{ id: string }>
 
