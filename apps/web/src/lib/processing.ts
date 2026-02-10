@@ -25,16 +25,10 @@ interface ProcessResult {
   error?: string
 }
 
-interface DbResult<T> {
-  data: T | null
-  error: Error | null
-}
-
 /**
  * Call Groq API directly to avoid SDK header issues
  */
 async function callGroq(prompt: string, systemPrompt?: string): Promise<string> {
-  // Trim the API key to remove any whitespace that might cause header issues
   const apiKey = (process.env.GROQ_API_KEY || '').trim()
 
   if (!apiKey) {
@@ -82,7 +76,6 @@ async function fetchFirefliesTranscript(
   apiKey: string,
   transcriptId: string
 ): Promise<{ title: string; date: string; transcript: string; participants: string[] }> {
-  // Trim the API key to remove any whitespace
   const cleanApiKey = apiKey.trim()
 
   console.log('[Fireflies] Fetching transcript:', transcriptId)
@@ -166,7 +159,6 @@ ${transcript.slice(0, 2000)}`
       return category
     }
 
-    // Try to find a match
     for (const type of validTypes) {
       if (category.includes(type)) {
         return type
@@ -211,14 +203,12 @@ ${transcript.slice(0, 3000)}`
   try {
     const result = await callGroq(prompt)
 
-    // Try to parse JSON from the response
     const jsonMatch = result.match(/\{[\s\S]*\}/)
     if (!jsonMatch) return null
 
     const parsed = JSON.parse(jsonMatch[0])
     if (!parsed.name || parsed.name === 'null') return null
 
-    // Check for existing company match
     let existingId: string | undefined
     if (parsed.isExisting) {
       const match = existingCompanies.find(
@@ -398,16 +388,49 @@ async function updateJobProgress(
   result?: object,
   error?: string
 ) {
-  await (adminClient.from('processing_jobs') as ReturnType<typeof adminClient.from>)
-    .update({
-      status,
-      current_step: step,
-      progress,
-      result: result || {},
-      error: error || null,
-      updated_at: new Date().toISOString(),
-    } as never)
-    .eq('id', jobId)
+  try {
+    await (adminClient.from('processing_jobs') as ReturnType<typeof adminClient.from>)
+      .update({
+        status,
+        current_step: step,
+        progress,
+        result: result || null,
+        error: error || null,
+        updated_at: new Date().toISOString(),
+      } as never)
+      .eq('id', jobId)
+  } catch (err) {
+    console.error('[Job Update Error]', err)
+  }
+}
+
+/**
+ * Check if a memo already exists for this source
+ */
+async function checkExistingMemo(
+  adminClient: ReturnType<typeof createAdminClient>,
+  userId: string,
+  source: string,
+  sourceId: string
+): Promise<string | null> {
+  try {
+    // Check imported_transcripts table first
+    const { data: imported } = await (adminClient
+      .from('imported_transcripts') as ReturnType<typeof adminClient.from>)
+      .select('memo_id')
+      .eq('user_id', userId)
+      .eq('source', source)
+      .eq('source_id', sourceId)
+      .single() as { data: { memo_id: string } | null }
+
+    if (imported?.memo_id) {
+      return imported.memo_id
+    }
+
+    return null
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -418,26 +441,48 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
   const adminClient = createAdminClient()
   const { source, transcriptId, transcriptContent, userId, jobId, metadata } = input
 
-  console.log(`[Processing] Starting for user ${userId}, source: ${source}, jobId: ${jobId}`)
+  console.log(`[Processing] Starting for user ${userId}, source: ${source}, transcriptId: ${transcriptId}, jobId: ${jobId}`)
 
   try {
+    // IDEMPOTENCY CHECK: Check if we already processed this transcript
+    if (source === 'fireflies' && transcriptId) {
+      const existingMemoId = await checkExistingMemo(adminClient, userId, source, transcriptId)
+      if (existingMemoId) {
+        console.log(`[Processing] Already processed - memo exists: ${existingMemoId}`)
+        if (jobId) {
+          await updateJobProgress(adminClient, jobId, 'completed', 100, 'completed', {
+            memo_id: existingMemoId,
+            skipped: true,
+            reason: 'Already processed',
+          })
+        }
+        return {
+          success: true,
+          memoId: existingMemoId,
+        }
+      }
+    }
+
     let transcript = transcriptContent || ''
     let meetingTitle = metadata?.title || 'Meeting Memo'
-    let meetingDate = metadata?.date || new Date().toISOString()
-    let participants = metadata?.participants || []
+    let meetingDate = metadata?.date || null
 
     // Step 1: Fetch transcript if needed
     if (source === 'fireflies' && transcriptId && !transcript) {
       if (jobId) await updateJobProgress(adminClient, jobId, 'fetching', 10)
 
       // Get Fireflies API key
-      const { data: integration } = await (adminClient
+      const { data: integration, error: integrationError } = await (adminClient
         .from('integrations') as ReturnType<typeof adminClient.from>)
         .select('credentials')
         .eq('user_id', userId)
         .eq('provider', 'fireflies')
         .eq('status', 'active')
-        .single() as unknown as DbResult<{ credentials: { api_key?: string } | null }>
+        .single() as { data: { credentials: { api_key?: string } | null } | null; error: unknown }
+
+      if (integrationError) {
+        console.error('[Processing] Integration lookup error:', integrationError)
+      }
 
       if (!integration?.credentials?.api_key) {
         throw new Error('Fireflies API key not configured. Please add your API key in Settings.')
@@ -447,7 +492,6 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
       transcript = ffData.transcript
       meetingTitle = ffData.title || meetingTitle
       meetingDate = ffData.date || meetingDate
-      participants = ffData.participants
     }
 
     if (!transcript) {
@@ -467,7 +511,7 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
     const { data: existingCompanies } = await (adminClient
       .from('companies') as ReturnType<typeof adminClient.from>)
       .select('id, name')
-      .eq('user_id', userId) as unknown as { data: Array<{ id: string; name: string }> | null }
+      .eq('user_id', userId) as { data: Array<{ id: string; name: string }> | null }
 
     console.log(`[Processing] Detecting company...`)
     const companyDetection = await detectCompany(transcript, existingCompanies || [])
@@ -482,7 +526,7 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
         console.log(`[Processing] Matched existing company: ${companyName}`)
       } else {
         // Create new company
-        const { data: newCompany } = await (adminClient
+        const { data: newCompany, error: companyError } = await (adminClient
           .from('companies') as ReturnType<typeof adminClient.from>)
           .insert({
             user_id: userId,
@@ -492,7 +536,11 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
             stage: companyDetection.metadata.stage || null,
           } as never)
           .select('id')
-          .single() as unknown as DbResult<{ id: string }>
+          .single() as { data: { id: string } | null; error: unknown }
+
+        if (companyError) {
+          console.error('[Processing] Company creation error:', companyError)
+        }
 
         if (newCompany) {
           companyId = newCompany.id
@@ -516,59 +564,75 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
     console.log(`[Processing] Extracting tasks...`)
     const tasks = await extractTasks(memoContent)
 
-    // Step 7: Save memo
+    // Step 7: Save memo - USE ONLY VERIFIED FIELDS
     if (jobId) await updateJobProgress(adminClient, jobId, 'saving', 85)
 
-    // Get default folder
+    // Get default folder (optional)
     const { data: defaultFolder } = await (adminClient
       .from('folders') as ReturnType<typeof adminClient.from>)
       .select('id')
       .eq('user_id', userId)
       .eq('is_default', true)
-      .single() as unknown as DbResult<{ id: string }>
+      .single() as { data: { id: string } | null }
+
+    // Insert memo with ONLY fields we know exist
+    const memoInsertData: Record<string, unknown> = {
+      user_id: userId,
+      title: meetingTitle,
+      content: memoContent,
+      summary: summary || null,
+      source: source || 'manual',
+    }
+
+    // Add optional fields only if they have values
+    if (defaultFolder?.id) {
+      memoInsertData.folder_id = defaultFolder.id
+    }
+    if (companyId) {
+      memoInsertData.company_id = companyId
+    }
+    if (meetingDate) {
+      memoInsertData.meeting_date = meetingDate
+    }
+
+    console.log('[Processing] Inserting memo with fields:', Object.keys(memoInsertData))
 
     const { data: memo, error: memoError } = await (adminClient
       .from('memos') as ReturnType<typeof adminClient.from>)
-      .insert({
-        user_id: userId,
-        folder_id: defaultFolder?.id || null,
-        company_id: companyId,
-        source,
-        source_id: transcriptId || null,
-        title: meetingTitle,
-        content: memoContent,
-        summary,
-        transcript,
-        meeting_date: meetingDate,
-        participants,
-        meeting_type: meetingType,
-        status: 'completed',
-        metadata: {
-          processing_completed_at: new Date().toISOString(),
-        },
-      } as never)
+      .insert(memoInsertData as never)
       .select('id')
-      .single() as unknown as DbResult<{ id: string }>
+      .single() as { data: { id: string } | null; error: { message?: string; details?: string; code?: string } | null }
 
-    if (memoError || !memo) {
-      throw new Error(memoError?.message || 'Failed to save memo')
+    if (memoError) {
+      console.error('[Processing] Memo insert error:', JSON.stringify(memoError, null, 2))
+      throw new Error(`Failed to save memo: ${memoError.message || memoError.details || 'Unknown database error'}`)
+    }
+
+    if (!memo) {
+      throw new Error('Memo was not created - no data returned')
     }
 
     console.log(`[Processing] Memo saved: ${memo.id}`)
 
     // Step 8: Save tasks
     if (tasks.length > 0) {
-      await (adminClient.from('tasks') as ReturnType<typeof adminClient.from>).insert(
+      const { error: tasksError } = await (adminClient.from('tasks') as ReturnType<typeof adminClient.from>).insert(
         tasks.map((t) => ({
           user_id: userId,
           memo_id: memo.id,
           company_id: companyId,
-          title: t.title,
+          title: t.title.slice(0, 255), // Ensure title fits
           priority: t.priority || 'medium',
           status: 'pending',
         })) as never
-      )
-      console.log(`[Processing] Created ${tasks.length} tasks`)
+      ) as { error: unknown }
+
+      if (tasksError) {
+        console.error('[Processing] Tasks creation error:', tasksError)
+        // Don't fail the whole process for task errors
+      } else {
+        console.log(`[Processing] Created ${tasks.length} tasks`)
+      }
     }
 
     // Step 9: File to Google Drive
@@ -581,7 +645,7 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
         .eq('user_id', userId)
         .eq('provider', 'google')
         .eq('status', 'active')
-        .single() as unknown as DbResult<{ credentials: { access_token?: string; refresh_token?: string; drive_folder_id?: string } | null }>
+        .single() as { data: { credentials: { access_token?: string; refresh_token?: string; drive_folder_id?: string } | null } | null }
 
       if (googleIntegration?.credentials?.access_token) {
         console.log(`[Processing] Filing to Google Drive...`)
@@ -611,7 +675,6 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
       }
     } catch (driveError) {
       console.error('[Processing] Drive filing error (non-fatal):', driveError)
-      // Don't fail the whole process for Drive errors
     }
 
     // Step 10: Mark job as completed
@@ -623,16 +686,20 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
       })
     }
 
-    // Mark transcript as imported
+    // Mark transcript as imported (for idempotency)
     if (source === 'fireflies' && transcriptId) {
-      await (adminClient
+      const { error: importError } = await (adminClient
         .from('imported_transcripts') as ReturnType<typeof adminClient.from>)
         .upsert({
           user_id: userId,
           source: 'fireflies',
           source_id: transcriptId,
           memo_id: memo.id,
-        } as never, { onConflict: 'user_id,source,source_id' })
+        } as never, { onConflict: 'user_id,source,source_id' }) as { error: unknown }
+
+      if (importError) {
+        console.error('[Processing] Import tracking error:', importError)
+      }
     }
 
     console.log(`[Processing] Complete! Memo ID: ${memo.id}`)
@@ -690,10 +757,11 @@ export async function enqueueProcessingJob(userId: string, payload: QueuePayload
       },
     } as never)
     .select('id')
-    .single() as unknown as DbResult<{ id: string }>
+    .single() as { data: { id: string } | null; error: unknown }
 
   if (error || !job) {
-    throw new Error(error?.message || 'Failed to create processing job')
+    console.error('[Enqueue] Error:', error)
+    throw new Error('Failed to create processing job')
   }
 
   return job.id
@@ -706,7 +774,7 @@ export async function processPendingJobs(limit = 3) {
     .select('id, user_id, source, source_id, metadata')
     .eq('status', 'pending')
     .order('created_at', { ascending: true })
-    .limit(limit) as unknown as { data: Array<{ id: string; user_id: string; source: string; source_id: string | null; metadata: Record<string, unknown> | null }> | null }
+    .limit(limit) as { data: Array<{ id: string; user_id: string; source: string; source_id: string | null; metadata: Record<string, unknown> | null }> | null }
 
   if (!pendingJobs || pendingJobs.length === 0) {
     return 0

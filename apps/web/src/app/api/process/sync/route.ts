@@ -1,8 +1,10 @@
 import { createClient, createAdminClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
-import { detectMeetingType, getMemoTemplate, generateMemoFromTemplate, generateQuickSummary } from '@/lib/templates/detection'
-import { detectCompanyFromTranscript } from '@/lib/company-detection'
 import { createMemoInDrive } from '@/lib/google/drive'
+
+// Use direct fetch to Groq API
+const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions'
+const GROQ_MODEL = 'llama-3.3-70b-versatile'
 
 interface FirefliesTranscript {
   id: string
@@ -14,35 +16,76 @@ interface FirefliesTranscript {
   }>
 }
 
+async function callGroq(prompt: string, systemPrompt?: string): Promise<string> {
+  const apiKey = (process.env.GROQ_API_KEY || '').trim()
+
+  if (!apiKey) {
+    throw new Error('GROQ_API_KEY not configured')
+  }
+
+  const messages = []
+  if (systemPrompt) {
+    messages.push({ role: 'system', content: systemPrompt })
+  }
+  messages.push({ role: 'user', content: prompt })
+
+  const response = await fetch(GROQ_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      messages,
+      temperature: 0.7,
+      max_tokens: 4096,
+    }),
+  })
+
+  if (!response.ok) {
+    const errorText = await response.text()
+    console.error('[Groq API Error]', response.status, errorText)
+    throw new Error(`Groq API error: ${response.status}`)
+  }
+
+  const data = await response.json()
+  return data.choices?.[0]?.message?.content || ''
+}
+
 async function fetchFirefliesTranscript(apiKey: string, transcriptId: string): Promise<FirefliesTranscript | null> {
-  const query = `
-    query Transcript($transcriptId: String!) {
-      transcript(id: $transcriptId) {
-        id
-        title
-        date
-        sentences {
-          speaker_name
-          text
-        }
-      }
-    }
-  `
+  const cleanApiKey = apiKey.trim()
 
   try {
     const response = await fetch('https://api.fireflies.ai/graphql', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
+        'Authorization': `Bearer ${cleanApiKey}`,
       },
       body: JSON.stringify({
-        query,
+        query: `
+          query Transcript($transcriptId: String!) {
+            transcript(id: $transcriptId) {
+              id
+              title
+              date
+              sentences {
+                speaker_name
+                text
+              }
+            }
+          }
+        `,
         variables: { transcriptId },
       }),
     })
 
     const result = await response.json()
+    if (result.errors) {
+      console.error('[Fireflies] GraphQL errors:', result.errors)
+      return null
+    }
     return result.data?.transcript || null
   } catch (error) {
     console.error('Failed to fetch Fireflies transcript:', error)
@@ -56,7 +99,120 @@ function formatTranscript(sentences: Array<{ speaker_name: string; text: string 
     .join('\n')
 }
 
+async function detectMeetingType(transcript: string): Promise<string> {
+  try {
+    const result = await callGroq(`Classify this meeting transcript into one of these categories:
+- founder-pitch: A startup pitch meeting with founders
+- customer-call: Customer discovery or sales call
+- partner-meeting: Partnership or BD discussion
+- internal: Internal team meeting
+- board-meeting: Board or investor update
+- due-diligence: Due diligence or reference call
+
+Return ONLY the category ID. If unsure, return "internal".
+
+Transcript excerpt:
+${transcript.slice(0, 2000)}`)
+
+    const category = result.trim().toLowerCase().replace(/['"]/g, '')
+    const validTypes = ['founder-pitch', 'customer-call', 'partner-meeting', 'internal', 'board-meeting', 'due-diligence']
+    return validTypes.includes(category) ? category : 'internal'
+  } catch {
+    return 'internal'
+  }
+}
+
+async function detectCompany(
+  transcript: string,
+  existingCompanies: Array<{ id: string; name: string }>
+): Promise<{ name: string; existingId?: string; metadata: Record<string, string> } | null> {
+  try {
+    const companyList = existingCompanies.length > 0
+      ? `Known companies: ${existingCompanies.map(c => c.name).join(', ')}`
+      : ''
+
+    const result = await callGroq(`Extract company information from this meeting transcript.
+
+${companyList}
+
+Return a JSON object with:
+- name: Company name (or null if not identifiable)
+- isExisting: true if it matches a known company
+- website: Company website if mentioned
+- industry: Industry if identifiable
+- stage: Funding stage (seed, series-a, etc.)
+
+Return ONLY valid JSON.
+
+Transcript:
+${transcript.slice(0, 3000)}`)
+
+    const jsonMatch = result.match(/\{[\s\S]*\}/)
+    if (!jsonMatch) return null
+
+    const parsed = JSON.parse(jsonMatch[0])
+    if (!parsed.name || parsed.name === 'null') return null
+
+    let existingId: string | undefined
+    if (parsed.isExisting) {
+      const match = existingCompanies.find(c => c.name.toLowerCase() === parsed.name.toLowerCase())
+      if (match) existingId = match.id
+    }
+
+    return {
+      name: parsed.name,
+      existingId,
+      metadata: {
+        website: parsed.website || '',
+        industry: parsed.industry || '',
+        stage: parsed.stage || '',
+      },
+    }
+  } catch {
+    return null
+  }
+}
+
+async function generateMemoContent(transcript: string, meetingType: string): Promise<string> {
+  const templates: Record<string, string> = {
+    'founder-pitch': `Generate a VC investment memo. Include:
+## Executive Summary
+## Company Overview
+## Problem & Solution
+## Market Opportunity
+## Business Model
+## Team
+## Traction
+## Investment Ask
+## Key Concerns
+## Next Steps`,
+    'internal': `Generate a meeting summary. Include:
+## Meeting Purpose
+## Key Discussion Points
+## Decisions Made
+## Action Items
+## Next Steps`,
+  }
+
+  return await callGroq(
+    `${templates[meetingType] || templates['internal']}
+
+Be concise. Extract specific numbers and facts.
+If info not available, write "Not discussed."
+
+Transcript:
+${transcript.slice(0, 6000)}`,
+    'You are an AI assistant for VC investors. Generate professional, structured meeting memos.'
+  )
+}
+
+async function generateSummary(transcript: string): Promise<string> {
+  return await callGroq(`Summarize this meeting in 2-3 sentences:\n\n${transcript.slice(0, 2000)}`)
+}
+
 export async function POST(request: Request) {
+  const startTime = Date.now()
+
   try {
     const { source, transcriptId, content, title } = await request.json()
 
@@ -68,13 +224,34 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
+    console.log(`[Sync] Starting for user ${user.id}, source: ${source}, transcriptId: ${transcriptId}`)
+
+    // IDEMPOTENCY CHECK: Check if already imported
+    if (source === 'fireflies' && transcriptId) {
+      const { data: existing } = await (adminClient
+        .from('imported_transcripts') as ReturnType<typeof adminClient.from>)
+        .select('memo_id')
+        .eq('user_id', user.id)
+        .eq('source', 'fireflies')
+        .eq('source_id', transcriptId)
+        .single() as { data: { memo_id: string } | null }
+
+      if (existing?.memo_id) {
+        console.log(`[Sync] Already imported: ${existing.memo_id}`)
+        return NextResponse.json({
+          success: true,
+          memoId: existing.memo_id,
+          skipped: true,
+        })
+      }
+    }
+
     let transcriptContent = content
     let memoTitle = title || 'Meeting Memo'
     let meetingDate: string | null = null
 
     // Step 1: Get transcript content
     if (source === 'fireflies' && transcriptId) {
-      // Get Fireflies API key from integrations
       const { data: integration } = await (adminClient
         .from('integrations') as ReturnType<typeof adminClient.from>)
         .select('credentials')
@@ -101,56 +278,60 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'No transcript content provided' }, { status: 400 })
     }
 
-    // Step 2: Detect meeting type and get template
-    const meetingType = await detectMeetingType(transcriptContent)
-    const template = getMemoTemplate(meetingType)
+    console.log(`[Sync] Transcript length: ${transcriptContent.length}`)
 
-    // Step 3: Detect company from transcript
+    // Step 2: Detect meeting type
+    const meetingType = await detectMeetingType(transcriptContent)
+    console.log(`[Sync] Meeting type: ${meetingType}`)
+
+    // Step 3: Detect company
     const { data: existingCompanies } = await (adminClient
       .from('companies') as ReturnType<typeof adminClient.from>)
-      .select('id, name, domain, normalized_domain')
-      .eq('user_id', user.id) as { data: Array<{ id: string; name: string; domain: string | null; normalized_domain: string | null }> | null }
+      .select('id, name')
+      .eq('user_id', user.id) as { data: Array<{ id: string; name: string }> | null }
 
-    const companyDetection = await detectCompanyFromTranscript(
-      transcriptContent,
-      existingCompanies || []
-    )
+    const companyDetection = await detectCompany(transcriptContent, existingCompanies || [])
 
-    // Step 4: Get or create company
     let companyId: string | null = null
     let companyName: string | null = null
 
-    if (companyDetection && companyDetection.confidence > 0.6) {
-      if (companyDetection.existingCompanyId) {
-        companyId = companyDetection.existingCompanyId
+    if (companyDetection) {
+      if (companyDetection.existingId) {
+        companyId = companyDetection.existingId
         companyName = companyDetection.name
+        console.log(`[Sync] Matched company: ${companyName}`)
       } else {
         // Create new company
-        const { data: newCompany } = await (adminClient
+        const { data: newCompany, error: companyError } = await (adminClient
           .from('companies') as ReturnType<typeof adminClient.from>)
           .insert({
             user_id: user.id,
             name: companyDetection.name,
-            domain: companyDetection.metadata.domain || null,
-            normalized_domain: companyDetection.metadata.domain?.toLowerCase() || null,
-            stage: companyDetection.metadata.stage || null,
+            website: companyDetection.metadata.website || null,
             industry: companyDetection.metadata.industry || null,
+            stage: companyDetection.metadata.stage || null,
           } as never)
           .select('id')
-          .single() as { data: { id: string } | null }
+          .single() as { data: { id: string } | null; error: unknown }
+
+        if (companyError) {
+          console.error('[Sync] Company creation error:', companyError)
+        }
 
         if (newCompany) {
           companyId = newCompany.id
           companyName = companyDetection.name
+          console.log(`[Sync] Created company: ${companyName}`)
         }
       }
     }
 
-    // Step 5: Generate memo content using template
-    const memoContent = await generateMemoFromTemplate(transcriptContent, template)
-    const summary = await generateQuickSummary(transcriptContent)
+    // Step 4: Generate memo content
+    console.log(`[Sync] Generating memo...`)
+    const memoContent = await generateMemoContent(transcriptContent, meetingType)
+    const summary = await generateSummary(transcriptContent)
 
-    // Step 6: Get default folder
+    // Step 5: Get default folder
     const { data: defaultFolder } = await supabase
       .from('folders')
       .select('id')
@@ -158,45 +339,61 @@ export async function POST(request: Request) {
       .eq('is_default', true)
       .single()
 
-    // Step 7: Save memo to database
-    const { data: memo, error: memoError } = await (supabase
-      .from('memos') as ReturnType<typeof supabase.from>)
-      .insert({
-        user_id: user.id,
-        folder_id: (defaultFolder as { id: string } | null)?.id || null,
-        company_id: companyId,
-        source: source || 'manual',
-        source_id: transcriptId || null,
-        title: memoTitle,
-        content: memoContent,
-        summary,
-        meeting_date: meetingDate,
-        meeting_type: meetingType,
-        template_id: template.id,
-        transcript: transcriptContent,
-      } as never)
-      .select('id, title')
-      .single() as { data: { id: string; title: string } | null; error: Error | null }
-
-    if (memoError || !memo) {
-      console.error('Failed to save memo:', memoError)
-      return NextResponse.json({ error: 'Failed to save memo' }, { status: 500 })
+    // Step 6: Save memo - ONLY VERIFIED FIELDS
+    const memoInsertData: Record<string, unknown> = {
+      user_id: user.id,
+      title: memoTitle,
+      content: memoContent,
+      summary: summary || null,
+      source: source || 'manual',
     }
 
-    // Step 8: Create Drive doc if Google is connected
-    let driveFileId: string | null = null
+    if ((defaultFolder as { id: string } | null)?.id) {
+      memoInsertData.folder_id = (defaultFolder as { id: string }).id
+    }
+    if (companyId) {
+      memoInsertData.company_id = companyId
+    }
+    if (meetingDate) {
+      memoInsertData.meeting_date = meetingDate
+    }
+
+    console.log('[Sync] Inserting memo with fields:', Object.keys(memoInsertData))
+
+    const { data: memo, error: memoError } = await (supabase
+      .from('memos') as ReturnType<typeof supabase.from>)
+      .insert(memoInsertData as never)
+      .select('id, title')
+      .single() as { data: { id: string; title: string } | null; error: { message?: string; details?: string; code?: string } | null }
+
+    if (memoError) {
+      console.error('[Sync] Memo insert error:', JSON.stringify(memoError, null, 2))
+      return NextResponse.json({
+        error: `Failed to save memo: ${memoError.message || memoError.details || 'Database error'}`,
+        details: memoError,
+      }, { status: 500 })
+    }
+
+    if (!memo) {
+      return NextResponse.json({ error: 'Memo was not created' }, { status: 500 })
+    }
+
+    console.log(`[Sync] Memo saved: ${memo.id}`)
+
+    // Step 7: Create Drive doc if Google is connected
     let driveWebViewLink: string | null = null
 
-    const { data: googleIntegration } = await (adminClient
-      .from('integrations') as ReturnType<typeof adminClient.from>)
-      .select('credentials')
-      .eq('user_id', user.id)
-      .eq('provider', 'google')
-      .eq('status', 'active')
-      .single() as { data: { credentials: { access_token: string; refresh_token?: string; drive_folder_id?: string } } | null }
+    try {
+      const { data: googleIntegration } = await (adminClient
+        .from('integrations') as ReturnType<typeof adminClient.from>)
+        .select('credentials')
+        .eq('user_id', user.id)
+        .eq('provider', 'google')
+        .eq('status', 'active')
+        .single() as { data: { credentials: { access_token: string; refresh_token?: string; drive_folder_id?: string } } | null }
 
-    if (googleIntegration?.credentials?.access_token) {
-      try {
+      if (googleIntegration?.credentials?.access_token) {
+        console.log(`[Sync] Filing to Google Drive...`)
         const driveResult = await createMemoInDrive(
           googleIntegration.credentials.access_token,
           googleIntegration.credentials.refresh_token,
@@ -212,19 +409,16 @@ export async function POST(request: Request) {
         )
 
         if (driveResult) {
-          driveFileId = driveResult.fileId
           driveWebViewLink = driveResult.webViewLink
 
-          // Update memo with Drive info
           await (supabase
             .from('memos') as ReturnType<typeof supabase.from>)
             .update({
-              drive_file_id: driveFileId,
-              drive_web_view_link: driveWebViewLink,
+              drive_file_id: driveResult.fileId,
+              drive_web_view_link: driveResult.webViewLink,
             } as never)
             .eq('id', memo.id)
 
-          // Update integration with folder ID if new
           if (driveResult.folderId !== googleIntegration.credentials.drive_folder_id) {
             await (adminClient
               .from('integrations') as ReturnType<typeof adminClient.from>)
@@ -237,14 +431,15 @@ export async function POST(request: Request) {
               .eq('user_id', user.id)
               .eq('provider', 'google')
           }
+
+          console.log(`[Sync] Filed to Drive: ${driveResult.webViewLink}`)
         }
-      } catch (error) {
-        console.error('Failed to create Drive doc:', error)
-        // Don't fail the whole request, memo is saved
       }
+    } catch (driveError) {
+      console.error('[Sync] Drive error (non-fatal):', driveError)
     }
 
-    // Mark the fireflies transcript as imported if applicable
+    // Step 8: Mark transcript as imported
     if (source === 'fireflies' && transcriptId) {
       await (adminClient
         .from('imported_transcripts') as ReturnType<typeof adminClient.from>)
@@ -256,15 +451,18 @@ export async function POST(request: Request) {
         } as never, { onConflict: 'user_id,source,source_id' })
     }
 
+    console.log(`[Sync] Complete in ${Date.now() - startTime}ms`)
+
     return NextResponse.json({
       success: true,
       memoId: memo.id,
       memoTitle: memo.title,
       companyName,
       driveWebViewLink,
+      processingTime: Date.now() - startTime,
     })
   } catch (error) {
-    console.error('Sync process error:', error)
+    console.error('[Sync] Error:', error)
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Processing failed' },
       { status: 500 }
