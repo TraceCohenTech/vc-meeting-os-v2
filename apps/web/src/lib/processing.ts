@@ -841,7 +841,7 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
         .single() as { data: { credentials: { access_token?: string; refresh_token?: string; drive_folder_id?: string } | null } | null }
 
       if (googleIntegration?.credentials?.access_token) {
-        console.log(`[Processing] Filing to Google Drive...`)
+        console.log(`[Processing] Filing to Google Drive... (type: ${meetingType})`)
         const driveResult = await createMemoInDrive(
           googleIntegration.credentials.access_token,
           googleIntegration.credentials.refresh_token,
@@ -853,6 +853,7 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
             summary,
             meetingDate,
             companyName,
+            meetingType,
           }
         )
 

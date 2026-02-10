@@ -288,18 +288,24 @@ export async function POST(request: Request) {
 
     console.log(`[Sync] Transcript length: ${transcriptContent.length}`)
 
-    // Step 2: Detect meeting type
-    const meetingType = await detectMeetingType(transcriptContent)
-    console.log(`[Sync] Meeting type: ${meetingType}`)
-
-    // Step 3: Detect company
+    // Step 2: Run detection in parallel for speed
+    // - Meeting type detection
+    // - Company detection (after fetching existing companies)
+    // - Summary generation (independent of meeting type)
     const { data: existingCompanies } = await (adminClient
       .from('companies') as ReturnType<typeof adminClient.from>)
       .select('id, name')
       .eq('user_id', user.id) as { data: Array<{ id: string; name: string }> | null }
 
-    const companyDetection = await detectCompany(transcriptContent, existingCompanies || [])
+    console.log(`[Sync] Running parallel detection...`)
+    const [meetingType, companyDetection, summary] = await Promise.all([
+      detectMeetingType(transcriptContent),
+      detectCompany(transcriptContent, existingCompanies || []),
+      generateSummary(transcriptContent),
+    ])
+    console.log(`[Sync] Meeting type: ${meetingType}`)
 
+    // Step 3: Handle company (create if needed)
     let companyId: string | null = null
     let companyName: string | null = null
 
@@ -334,10 +340,9 @@ export async function POST(request: Request) {
       }
     }
 
-    // Step 4: Generate memo content
+    // Step 4: Generate memo content (needs meeting type)
     console.log(`[Sync] Generating memo...`)
     const memoContent = await generateMemoContent(transcriptContent, meetingType)
-    const summary = await generateSummary(transcriptContent)
 
     // Step 5: Get default folder
     const { data: defaultFolder } = await supabase
@@ -401,7 +406,7 @@ export async function POST(request: Request) {
         .single() as { data: { credentials: { access_token: string; refresh_token?: string; drive_folder_id?: string } } | null }
 
       if (googleIntegration?.credentials?.access_token) {
-        console.log(`[Sync] Filing to Google Drive...`)
+        console.log(`[Sync] Filing to Google Drive... (type: ${meetingType})`)
         const driveResult = await createMemoInDrive(
           googleIntegration.credentials.access_token,
           googleIntegration.credentials.refresh_token,
@@ -413,6 +418,7 @@ export async function POST(request: Request) {
             summary,
             meetingDate,
             companyName,
+            meetingType,
           }
         )
 
