@@ -137,32 +137,59 @@ async function fetchFirefliesTranscript(
  * Detect meeting type from transcript
  */
 async function detectMeetingType(transcript: string): Promise<string> {
-  const prompt = `Classify this meeting transcript into one of these categories:
-- founder-pitch: A startup pitch meeting with founders
-- customer-call: Customer discovery or sales call
-- partner-meeting: Partnership or BD discussion
-- internal: Internal team meeting
-- board-meeting: Board or investor update
-- due-diligence: Due diligence or reference call
+  const prompt = `You are classifying a meeting transcript for a VC investor. Analyze the content and participants to determine the meeting type.
 
-Return ONLY the category ID (e.g., "founder-pitch"). If unsure, return "internal".
+Categories:
+- founder-pitch: A startup founder pitching their company to a VC for investment
+- portfolio-update: Check-in with a portfolio company the VC has already invested in
+- due-diligence: Reference calls, background checks, or deep-dive research on a company
+- vc-catchup: Two or more VCs catching up, sharing deal flow, discussing market trends
+- lp-meeting: Meeting with limited partners (LPs) or fund investors
+- board-meeting: Board meeting or formal investor update
+- partner-meeting: Partnership, BD, or collaboration discussions
+- customer-call: Customer discovery, sales, or product feedback call
+- recruiting: Interview or recruiting conversation
+- internal: Internal team meeting, planning, or operations
+- networking: General networking, relationship building, or informal catch-up
+
+Key signals:
+- If two VCs are discussing deals, startups, or market trends → vc-catchup
+- If a founder is presenting metrics, product, or asking for money → founder-pitch
+- If discussing a company the VC already invested in → portfolio-update
+- If making reference calls about a founder or company → due-diligence
+
+Return ONLY the category ID (e.g., "founder-pitch", "vc-catchup"). Be specific - don't default to "internal" unless it truly is an internal team meeting.
 
 Transcript excerpt:
-${transcript.slice(0, 2000)}`
+${transcript.slice(0, 3000)}`
 
   try {
     const result = await callGroq(prompt)
-    const category = result.trim().toLowerCase().replace(/['"]/g, '')
+    const category = result.trim().toLowerCase().replace(/['"]/g, '').replace(/\s+/g, '-')
 
-    const validTypes = ['founder-pitch', 'customer-call', 'partner-meeting', 'internal', 'board-meeting', 'due-diligence']
+    const validTypes = [
+      'founder-pitch', 'portfolio-update', 'due-diligence', 'vc-catchup',
+      'lp-meeting', 'board-meeting', 'partner-meeting', 'customer-call',
+      'recruiting', 'internal', 'networking'
+    ]
+
     if (validTypes.includes(category)) {
       return category
     }
 
+    // Try to match partial
     for (const type of validTypes) {
-      if (category.includes(type)) {
+      if (category.includes(type) || type.includes(category)) {
         return type
       }
+    }
+
+    // Default based on keywords in the response
+    if (category.includes('vc') || category.includes('investor') || category.includes('deal')) {
+      return 'vc-catchup'
+    }
+    if (category.includes('pitch') || category.includes('founder') || category.includes('startup')) {
+      return 'founder-pitch'
     }
 
     return 'internal'
@@ -333,6 +360,165 @@ async function generateMemoContent(transcript: string, meetingType: string): Pro
 - Who does what by when
 
 ## Next Steps`,
+
+    'vc-catchup': `Generate a VC catch-up memo. This is a meeting between investors discussing deals, market trends, and sharing deal flow. Include:
+
+## Meeting Overview
+- Who met and context
+
+## Deal Flow Shared
+- Companies discussed or referred
+- Stage, sector, and any key details for each
+
+## Market Insights
+- Trends or themes discussed
+- Sectors getting hot or cooling
+
+## Portfolio Updates
+- Any updates on shared portfolio companies
+
+## Collaboration Opportunities
+- Co-investment opportunities
+- Intros to make
+
+## Key Takeaways
+- Main insights from the conversation
+
+## Follow-ups
+- Action items and next steps`,
+
+    'portfolio-update': `Generate a portfolio company update memo. Include:
+
+## Company Status
+- Company name and current stage
+
+## Key Metrics
+- Revenue, growth, burn rate
+- User/customer metrics
+
+## Progress Since Last Check-in
+- Milestones achieved
+- Product updates
+
+## Challenges
+- Current obstacles
+- Where they need help
+
+## Runway & Fundraising
+- Current runway
+- Fundraising plans
+
+## Action Items
+- How we can help
+- Follow-ups needed`,
+
+    'lp-meeting': `Generate an LP meeting memo. Include:
+
+## Meeting Overview
+- LP name and context
+
+## Fund Performance Discussion
+- Performance updates shared
+- Portfolio highlights
+
+## LP Questions/Concerns
+- Questions raised
+- Concerns addressed
+
+## Relationship Status
+- Current investment level
+- Interest in future funds
+
+## Follow-ups
+- Information to send
+- Next meeting plans`,
+
+    'board-meeting': `Generate a board meeting memo. Include:
+
+## Meeting Overview
+- Company and attendees
+
+## Financial Review
+- Key financial metrics
+- Runway and burn
+
+## Business Update
+- Progress on goals
+- Key wins and challenges
+
+## Strategic Discussions
+- Major decisions made
+- Strategic pivots or plans
+
+## Governance Items
+- Formal resolutions
+- Compliance matters
+
+## Action Items
+- Board member follow-ups
+- Management commitments`,
+
+    'recruiting': `Generate a recruiting/interview memo. Include:
+
+## Candidate Overview
+- Name, role, background
+
+## Strengths
+- Key qualifications
+- Impressive experiences
+
+## Concerns
+- Gaps or red flags
+- Areas to probe further
+
+## Culture Fit
+- Team dynamics assessment
+
+## Recommendation
+- Hire/No hire/Next steps
+
+## Follow-ups
+- Reference checks needed
+- Next interview stages`,
+
+    'networking': `Generate a networking meeting memo. Include:
+
+## Meeting Overview
+- Who met and context
+
+## Key Topics Discussed
+- Main conversation themes
+
+## Interesting Insights
+- Valuable information shared
+
+## Potential Opportunities
+- Ways to collaborate or help each other
+
+## Follow-ups
+- Intros to make
+- Information to share
+- Next steps`,
+
+    'partner-meeting': `Generate a partnership discussion memo. Include:
+
+## Partner Overview
+- Company/person and their focus
+
+## Partnership Opportunity
+- What was proposed
+- Potential value
+
+## Terms Discussed
+- Key deal points
+- Structure considerations
+
+## Concerns
+- Risks or blockers
+
+## Next Steps
+- Follow-up actions
+- Decision timeline`,
   }
 
   const prompt = `${templatePrompts[meetingType] || templatePrompts['internal']}

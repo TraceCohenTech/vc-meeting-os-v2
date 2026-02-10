@@ -465,6 +465,8 @@ export async function POST(request: Request) {
       success: true,
       memoId: memo.id,
       memoTitle: memo.title,
+      memoContent: memoContent,
+      memoSummary: summary,
       companyName,
       driveWebViewLink,
       processingTime: Date.now() - startTime,

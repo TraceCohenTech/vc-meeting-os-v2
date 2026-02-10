@@ -77,24 +77,36 @@ export function TranscriptsTab() {
         throw new Error(data.error || 'Failed to generate memo')
       }
 
-      setGeneratingStep('Loading memo...')
+      // Use memo data directly from sync response (no second request needed)
+      if (data.memoContent) {
+        setGeneratedMemo({
+          id: data.memoId,
+          title: data.memoTitle,
+          summary: data.memoSummary || '',
+          content: data.memoContent,
+          companyName: data.companyName,
+          driveLink: data.driveWebViewLink,
+        })
+      } else {
+        // Fallback: fetch from API if content not included
+        setGeneratingStep('Loading memo...')
+        const memoRes = await fetch(`/api/memos/${data.memoId}`)
+        const memoData = await memoRes.json()
 
-      // Fetch the created memo
-      const memoRes = await fetch(`/api/memos/${data.memoId}`)
-      const memoData = await memoRes.json()
+        if (!memoRes.ok || !memoData.memo) {
+          console.error('Memo fetch failed:', memoRes.status, memoData)
+          throw new Error(memoData.error || `Failed to load memo (${memoRes.status})`)
+        }
 
-      if (!memoRes.ok) {
-        throw new Error('Failed to load generated memo')
+        setGeneratedMemo({
+          id: memoData.memo.id,
+          title: memoData.memo.title,
+          summary: memoData.memo.summary || '',
+          content: memoData.memo.content,
+          companyName: memoData.memo.companies?.name,
+          driveLink: memoData.memo.drive_web_view_link,
+        })
       }
-
-      setGeneratedMemo({
-        id: memoData.memo.id,
-        title: memoData.memo.title,
-        summary: memoData.memo.summary || '',
-        content: memoData.memo.content,
-        companyName: memoData.memo.companies?.name,
-        driveLink: memoData.memo.drive_web_view_link,
-      })
 
       // Mark as imported in the list
       setTranscripts(prev =>
