@@ -115,7 +115,6 @@ export async function POST(request: NextRequest) {
     const userId = job.user_id
     let transcript = job.metadata?.transcript_content || ''
     let meetingTitle = job.metadata?.title || 'Meeting Memo'
-    let participants = job.metadata?.participants || []
     let meetingDate = job.metadata?.meeting_date || new Date().toISOString()
 
     // If source is Fireflies and we have a source_id, fetch the transcript
@@ -138,7 +137,6 @@ export async function POST(request: NextRequest) {
         transcript = ffData.transcript
         meetingTitle = ffData.title || meetingTitle
         meetingDate = ffData.date || meetingDate
-        participants = ffData.participants
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Failed to fetch from Fireflies'
         await updateJobProgress(adminClient, jobId, 'failed', 0, 'failed', undefined, message)
