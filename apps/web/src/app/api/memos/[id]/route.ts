@@ -2,6 +2,54 @@ import { createClient, createAdminClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import { deleteMemoFromDrive } from '@/lib/google/drive'
 
+export async function GET(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await params
+    const supabase = await createClient()
+    const { data: { user } } = await supabase.auth.getUser()
+
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+
+    const { data: memo, error } = await (supabase
+      .from('memos') as ReturnType<typeof supabase.from>)
+      .select(`
+        id,
+        title,
+        summary,
+        content,
+        meeting_date,
+        meeting_type,
+        participants,
+        tags,
+        source,
+        drive_file_id,
+        drive_web_view_link,
+        created_at,
+        companies (id, name)
+      `)
+      .eq('id', id)
+      .eq('user_id', user.id)
+      .single() as { data: Record<string, unknown> | null; error: Error | null }
+
+    if (error || !memo) {
+      return NextResponse.json({ error: 'Memo not found' }, { status: 404 })
+    }
+
+    return NextResponse.json({ memo })
+  } catch (error) {
+    console.error('Get memo error:', error)
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Failed to get memo' },
+      { status: 500 }
+    )
+  }
+}
+
 export async function DELETE(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
