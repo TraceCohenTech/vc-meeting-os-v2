@@ -4,9 +4,11 @@ import Link from 'next/link'
 import Image from 'next/image'
 import { usePathname } from 'next/navigation'
 import {
-  Home,
+  LayoutDashboard,
   Building2,
   FileText,
+  MessageSquare,
+  BarChart3,
   Settings,
   LogOut,
   ChevronLeft,
@@ -17,9 +19,11 @@ import { useRouter } from 'next/navigation'
 import { useState } from 'react'
 
 const navItems = [
-  { href: '/dashboard', label: 'Activity', icon: Home },
+  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/memos', label: 'Memos', icon: FileText },
   { href: '/companies', label: 'Companies', icon: Building2 },
+  { href: '/chat', label: 'AI Chat', icon: MessageSquare },
+  { href: '/funds', label: 'Funds', icon: BarChart3 },
   { href: '/settings', label: 'Settings', icon: Settings },
 ]
 
