@@ -2,8 +2,6 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { processTranscriptToMemo } from '@/lib/processing'
 
-const FIREFLIES_WEBHOOK_SECRET = process.env.FIREFLIES_WEBHOOK_SECRET
-
 interface FirefliesPayload {
   meetingId: string
   eventType: string
