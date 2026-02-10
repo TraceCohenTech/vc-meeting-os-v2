@@ -117,6 +117,28 @@ export default async function HomePage() {
           </section>
         </div>
       </main>
+
+      <footer className="relative border-t border-slate-800/70 py-8">
+        <div className="max-w-6xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-4">
+          <p className="text-sm text-slate-500">
+            &copy; {new Date().getFullYear()} VC Meeting OS. All rights reserved.
+          </p>
+          <div className="flex items-center gap-6">
+            <Link
+              href="/privacy"
+              className="text-sm text-slate-400 hover:text-slate-300 transition-colors"
+            >
+              Privacy Policy
+            </Link>
+            <Link
+              href="/terms"
+              className="text-sm text-slate-400 hover:text-slate-300 transition-colors"
+            >
+              Terms of Service
+            </Link>
+          </div>
+        </div>
+      </footer>
     </div>
   )
 }
