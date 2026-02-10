@@ -39,6 +39,14 @@ async function getSupabaseUser(request: NextRequest) {
 }
 
 export async function middleware(request: NextRequest) {
+  // Handle OAuth code - redirect to auth callback if code is present at root
+  const code = request.nextUrl.searchParams.get('code')
+  if (code && request.nextUrl.pathname === '/') {
+    const url = request.nextUrl.clone()
+    url.pathname = '/auth/callback'
+    return NextResponse.redirect(url)
+  }
+
   const { user, response } = await getSupabaseUser(request)
 
   // Protected routes - redirect to login if not authenticated
