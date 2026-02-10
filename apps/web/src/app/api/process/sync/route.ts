@@ -271,7 +271,15 @@ export async function POST(request: Request) {
 
       transcriptContent = formatTranscript(transcript.sentences)
       memoTitle = transcript.title || memoTitle
-      meetingDate = transcript.date
+      // Convert Fireflies timestamp to ISO date string (YYYY-MM-DD)
+      if (transcript.date) {
+        try {
+          meetingDate = new Date(transcript.date).toISOString().split('T')[0]
+        } catch {
+          console.error('[Sync] Invalid date from Fireflies:', transcript.date)
+          meetingDate = null
+        }
+      }
     }
 
     if (!transcriptContent) {

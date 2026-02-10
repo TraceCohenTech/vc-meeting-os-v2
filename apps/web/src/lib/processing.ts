@@ -491,7 +491,14 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
       const ffData = await fetchFirefliesTranscript(integration.credentials.api_key, transcriptId)
       transcript = ffData.transcript
       meetingTitle = ffData.title || meetingTitle
-      meetingDate = ffData.date || meetingDate
+      // Convert Fireflies timestamp to ISO date string (YYYY-MM-DD)
+      if (ffData.date) {
+        try {
+          meetingDate = new Date(ffData.date).toISOString().split('T')[0]
+        } catch {
+          console.error('[Processing] Invalid date from Fireflies:', ffData.date)
+        }
+      }
     }
 
     if (!transcript) {
