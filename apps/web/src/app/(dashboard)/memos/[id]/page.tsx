@@ -5,10 +5,9 @@ import {
   ArrowLeft,
   Calendar,
   Building2,
-  FolderOpen,
   Clock,
-  Edit,
   ExternalLink,
+  FileText,
 } from 'lucide-react'
 import { DeleteMemoButton } from './DeleteMemoButton'
 
@@ -24,8 +23,18 @@ export default async function MemoPage({ params }: PageProps) {
   const { data: memo, error } = await supabase
     .from('memos')
     .select(`
-      *,
-      folders(id, name, color),
+      id,
+      title,
+      content,
+      summary,
+      meeting_date,
+      duration_minutes,
+      tags,
+      source,
+      drive_file_id,
+      drive_web_view_link,
+      created_at,
+      updated_at,
       companies(id, name, website)
     `)
     .eq('id', id)
@@ -39,9 +48,10 @@ export default async function MemoPage({ params }: PageProps) {
       duration_minutes: number | null
       tags: string[] | null
       source: string
+      drive_file_id: string | null
+      drive_web_view_link: string | null
       created_at: string
       updated_at: string
-      folders: { id: string; name: string; color: string } | null
       companies: { id: string; name: string; website: string | null } | null
     } | null, error: Error | null }
 
@@ -49,7 +59,6 @@ export default async function MemoPage({ params }: PageProps) {
     notFound()
   }
 
-  const folder = memo.folders
   const company = memo.companies
 
   // Fetch related tasks
@@ -65,20 +74,30 @@ export default async function MemoPage({ params }: PageProps) {
       due_date: string | null
     }> | null }
 
+  // Format content with markdown rendering
+  const formatContent = (content: string) => {
+    return content
+      .replace(/^## (.+)$/gm, '<h2 class="text-lg font-semibold text-white mt-6 mb-3">$1</h2>')
+      .replace(/^### (.+)$/gm, '<h3 class="text-base font-medium text-white mt-4 mb-2">$1</h3>')
+      .replace(/^\* (.+)$/gm, '<li class="ml-4 mb-1">$1</li>')
+      .replace(/^- (.+)$/gm, '<li class="ml-4 mb-1">$1</li>')
+      .replace(/\*\*(.+?)\*\*/g, '<strong class="text-white">$1</strong>')
+  }
+
   return (
     <div className="p-8 max-w-4xl mx-auto">
       {/* Header */}
-      <div className="mb-8">
+      <div className="mb-6">
         <Link
-          href="/memos"
+          href="/dashboard"
           className="inline-flex items-center gap-2 text-slate-400 hover:text-white mb-4"
         >
           <ArrowLeft className="w-4 h-4" />
-          Back to Memos
+          Back to Activity
         </Link>
 
         <div className="flex items-start justify-between gap-4">
-          <div>
+          <div className="flex-1">
             <h1 className="text-2xl font-bold text-white mb-2">{memo.title}</h1>
             <div className="flex flex-wrap items-center gap-4 text-sm text-slate-400">
               {memo.meeting_date && (
@@ -98,82 +117,85 @@ export default async function MemoPage({ params }: PageProps) {
                   {memo.duration_minutes} min
                 </div>
               )}
+              {memo.source && memo.source !== 'manual' && (
+                <span className="px-2 py-0.5 bg-slate-800 text-slate-400 text-xs rounded-full capitalize">
+                  {memo.source}
+                </span>
+              )}
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <Link
-              href={`/memos/${id}/edit`}
-              className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg"
-            >
-              <Edit className="w-5 h-5" />
-            </Link>
-            <DeleteMemoButton memoId={id} />
-          </div>
+          <DeleteMemoButton memoId={id} />
         </div>
       </div>
 
-      {/* Meta cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
-        {folder && (
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-            <div className="flex items-center gap-3">
-              <div
-                className="w-10 h-10 rounded-lg flex items-center justify-center"
-                style={{ backgroundColor: `${folder.color}20` }}
-              >
-                <FolderOpen className="w-5 h-5" style={{ color: folder.color }} />
-              </div>
-              <div>
-                <p className="text-xs text-slate-500">Folder</p>
-                <p className="text-white font-medium">{folder.name}</p>
-              </div>
-            </div>
+      {/* Primary CTA: Google Docs */}
+      {memo.drive_web_view_link ? (
+        <a
+          href={memo.drive_web_view_link}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center gap-4 p-4 mb-6 bg-gradient-to-r from-blue-600/20 to-cyan-600/20 border border-blue-500/30 rounded-xl hover:border-blue-500/50 transition-colors"
+        >
+          <div className="bg-blue-500 p-3 rounded-lg">
+            <FileText className="w-6 h-6 text-white" />
           </div>
-        )}
-
-        {company && (
-          <Link
-            href={`/companies/${company.id}`}
-            className="bg-slate-900 border border-slate-800 rounded-xl p-4 hover:border-slate-700 transition-colors"
-          >
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-emerald-500/20 flex items-center justify-center">
-                <Building2 className="w-5 h-5 text-emerald-400" />
-              </div>
-              <div className="flex-1">
-                <p className="text-xs text-slate-500">Company</p>
-                <p className="text-white font-medium">{company.name}</p>
-              </div>
-              {company.website && (
-                <ExternalLink className="w-4 h-4 text-slate-500" />
-              )}
-            </div>
+          <div className="flex-1">
+            <h3 className="text-white font-semibold">Open in Google Docs</h3>
+            <p className="text-slate-300 text-sm">
+              Edit and share this memo in your Drive
+            </p>
+          </div>
+          <ExternalLink className="w-5 h-5 text-blue-400" />
+        </a>
+      ) : (
+        <div className="flex items-center gap-3 p-3 mb-6 bg-slate-800/50 border border-slate-700 rounded-lg text-sm text-slate-400">
+          <FileText className="w-4 h-4" />
+          <span>Connect Google Drive in Settings to enable editing in Docs</span>
+          <Link href="/settings" className="text-indigo-400 hover:text-indigo-300 ml-auto">
+            Settings →
           </Link>
-        )}
-      </div>
-
-      {/* Summary */}
-      {memo.summary && (
-        <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-xl p-6 mb-8">
-          <h2 className="text-sm font-medium text-indigo-400 mb-2">Summary</h2>
-          <p className="text-slate-300">{memo.summary}</p>
         </div>
       )}
 
-      {/* Content */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 mb-8">
-        <div className="prose prose-invert max-w-none">
-          <div className="whitespace-pre-wrap text-slate-300 leading-relaxed">
-            {memo.content}
+      {/* Company card */}
+      {company && (
+        <Link
+          href={`/companies/${company.id}`}
+          className="flex items-center gap-4 p-4 mb-6 bg-slate-900 border border-slate-800 rounded-xl hover:border-slate-700 transition-colors"
+        >
+          <div className="w-12 h-12 rounded-xl bg-emerald-500/20 flex items-center justify-center">
+            <Building2 className="w-6 h-6 text-emerald-400" />
           </div>
+          <div className="flex-1">
+            <p className="text-xs text-slate-500 uppercase tracking-wide">Company</p>
+            <p className="text-white font-semibold text-lg">{company.name}</p>
+          </div>
+          <ExternalLink className="w-4 h-4 text-slate-500" />
+        </Link>
+      )}
+
+      {/* Summary */}
+      {memo.summary && (
+        <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-xl p-5 mb-6">
+          <h2 className="text-sm font-medium text-indigo-400 mb-2 uppercase tracking-wide">Summary</h2>
+          <p className="text-slate-300 leading-relaxed">{memo.summary}</p>
+        </div>
+      )}
+
+      {/* Content - Read Only */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 mb-6">
+        <div className="prose prose-invert max-w-none">
+          <div
+            className="text-slate-300 leading-relaxed whitespace-pre-wrap"
+            dangerouslySetInnerHTML={{ __html: formatContent(memo.content) }}
+          />
         </div>
       </div>
 
       {/* Tags */}
       {memo.tags && memo.tags.length > 0 && (
-        <div className="mb-8">
-          <h2 className="text-sm font-medium text-slate-400 mb-2">Tags</h2>
+        <div className="mb-6">
           <div className="flex flex-wrap gap-2">
             {memo.tags.map((tag) => (
               <span
@@ -189,18 +211,18 @@ export default async function MemoPage({ params }: PageProps) {
 
       {/* Tasks */}
       {tasks && tasks.length > 0 && (
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
-          <h2 className="text-lg font-semibold text-white mb-4">
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 mb-6">
+          <h2 className="text-sm font-medium text-slate-400 mb-4 uppercase tracking-wide">
             Action Items ({tasks.length})
           </h2>
-          <ul className="space-y-3">
+          <ul className="space-y-2">
             {tasks.map((task) => (
               <li
                 key={task.id}
                 className="flex items-center gap-3 p-3 bg-slate-800/50 rounded-lg"
               >
                 <div
-                  className={`w-2 h-2 rounded-full ${
+                  className={`w-2 h-2 rounded-full flex-shrink-0 ${
                     task.status === 'completed'
                       ? 'bg-emerald-500'
                       : task.priority === 'high'
@@ -225,24 +247,17 @@ export default async function MemoPage({ params }: PageProps) {
               </li>
             ))}
           </ul>
-          <Link
-            href="/tasks"
-            className="block text-center text-indigo-400 hover:text-indigo-300 text-sm mt-4"
-          >
-            View all tasks
-          </Link>
         </div>
       )}
 
       {/* Metadata footer */}
-      <div className="mt-8 pt-6 border-t border-slate-800 text-sm text-slate-500">
+      <div className="pt-6 border-t border-slate-800 text-sm text-slate-500">
         <p>
-          Created {new Date(memo.created_at).toLocaleString()} · Last updated{' '}
-          {new Date(memo.updated_at).toLocaleString()}
+          Generated {new Date(memo.created_at).toLocaleString()}
+          {memo.updated_at !== memo.created_at && (
+            <> · Updated {new Date(memo.updated_at).toLocaleString()}</>
+          )}
         </p>
-        {memo.source !== 'manual' && (
-          <p className="mt-1">Source: {memo.source}</p>
-        )}
       </div>
     </div>
   )

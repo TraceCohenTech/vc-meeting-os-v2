@@ -131,6 +131,20 @@ export function IntegrationsSection({ integrations }: IntegrationsSectionProps) 
       setApiKeyInput('')
       setShowApiKeyFor(null)
       router.refresh()
+
+      // Trigger backfill for Fireflies to import recent transcripts
+      if (providerId === 'fireflies') {
+        console.log('[Integrations] Triggering backfill for Fireflies...')
+        fetch('/api/process/backfill', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: user.id }),
+        }).then(res => res.json()).then(data => {
+          console.log('[Integrations] Backfill result:', data)
+        }).catch(err => {
+          console.error('[Integrations] Backfill failed:', err)
+        })
+      }
     } catch {
       setError('Failed to connect integration')
     } finally {

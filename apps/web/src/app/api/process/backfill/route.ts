@@ -104,7 +104,7 @@ async function backfillUser(
       body: JSON.stringify({
         query: `
           query RecentTranscripts {
-            transcripts(limit: 50) {
+            transcripts(limit: 20) {
               id
               title
               date
