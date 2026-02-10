@@ -22,7 +22,11 @@ function LoginContent() {
         provider: 'google',
         options: {
           redirectTo: `${window.location.origin}/auth/callback?redirectTo=${encodeURIComponent(redirectTo)}`,
-          scopes: 'email profile',
+          scopes: 'email profile https://www.googleapis.com/auth/drive.file',
+          queryParams: {
+            access_type: 'offline',
+            prompt: 'consent',
+          },
         },
       })
 
