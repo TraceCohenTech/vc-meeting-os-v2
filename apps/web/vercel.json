@@ -6,13 +6,13 @@
     }
   ],
   "functions": {
-    "api/webhooks/fireflies/route.ts": {
+    "src/app/api/webhooks/fireflies/route.ts": {
       "maxDuration": 60
     },
-    "api/process/sync/route.ts": {
+    "src/app/api/process/sync/route.ts": {
       "maxDuration": 60
     },
-    "api/cron/process-jobs/route.ts": {
+    "src/app/api/cron/process-jobs/route.ts": {
       "maxDuration": 60
     }
   }
