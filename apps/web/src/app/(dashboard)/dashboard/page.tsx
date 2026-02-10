@@ -1,11 +1,8 @@
 import { createClient } from '@/lib/supabase/server'
 import { FileText, Building2, CheckSquare, AlertCircle, TrendingUp, Clock, Zap, Loader2, CheckCircle2, XCircle } from 'lucide-react'
 import Link from 'next/link'
-import { Suspense } from 'react'
 import { RetryButton } from './RetryButton'
 import { ClearAllButton } from './ClearAllButton'
-import { DashboardTabs } from './DashboardTabs'
-import { DashboardContent } from './DashboardContent'
 
 interface Stats {
   total_memos: number
@@ -117,8 +114,15 @@ export default async function DashboardPage() {
     },
   ]
 
-  const overviewContent = (
-    <>
+  return (
+    <div className="p-8">
+      <div className="mb-8">
+        <h1 className="text-2xl font-bold text-white">Dashboard</h1>
+        <p className="text-slate-400 mt-1">
+          Welcome back! Here&apos;s what&apos;s happening with your deals.
+        </p>
+      </div>
+
       {/* Active Processing Banner - Only show when actively processing */}
       {hasActiveJobs && (
         <div className="mb-6 bg-gradient-to-r from-indigo-600/20 to-cyan-600/20 border border-indigo-500/30 rounded-xl p-4">
@@ -389,26 +393,6 @@ export default async function DashboardPage() {
           </p>
         </div>
       )}
-    </>
-  )
-
-  return (
-    <div className="p-8">
-      <div className="mb-8 flex items-start justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-white">Dashboard</h1>
-          <p className="text-slate-400 mt-1">
-            Welcome back! Here&apos;s what&apos;s happening with your deals.
-          </p>
-        </div>
-        <Suspense fallback={null}>
-          <DashboardTabs />
-        </Suspense>
-      </div>
-
-      <Suspense fallback={<div className="animate-pulse bg-slate-800 h-96 rounded-xl" />}>
-        <DashboardContent overviewContent={overviewContent} />
-      </Suspense>
     </div>
   )
 }

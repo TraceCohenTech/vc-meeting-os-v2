@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   Building2,
   FileText,
+  FileAudio,
   CheckSquare,
   MessageSquare,
   BarChart3,
@@ -22,6 +23,7 @@ import { useState } from 'react'
 
 const navItems = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { href: '/transcripts', label: 'Transcripts', icon: FileAudio },
   { href: '/companies', label: 'Companies', icon: Building2 },
   { href: '/memos', label: 'Memos', icon: FileText },
   { href: '/tasks', label: 'Tasks', icon: CheckSquare },
