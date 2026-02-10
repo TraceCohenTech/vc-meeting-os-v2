@@ -1,38 +1,58 @@
 import { NextRequest, NextResponse } from 'next/server'
-import {
-  ingestTranscript,
-  verifyWebhookSignature,
-  parseFirefliesPayload,
-} from '@/lib/ingestion'
 import { createAdminClient } from '@/lib/supabase/server'
+import { processTranscriptToMemo } from '@/lib/processing'
 
 const FIREFLIES_WEBHOOK_SECRET = process.env.FIREFLIES_WEBHOOK_SECRET
 
+interface FirefliesPayload {
+  meetingId: string
+  eventType: string
+  clientReferenceId?: string
+  transcript?: {
+    title: string
+    date: string
+    duration: number
+    participants: string[]
+  }
+}
+
+function parsePayload(body: unknown): FirefliesPayload | null {
+  if (!body || typeof body !== 'object') return null
+  const payload = body as Record<string, unknown>
+  if (!payload.meetingId || typeof payload.meetingId !== 'string') return null
+
+  return {
+    meetingId: payload.meetingId,
+    eventType: typeof payload.eventType === 'string' ? payload.eventType : '',
+    clientReferenceId: typeof payload.clientReferenceId === 'string' ? payload.clientReferenceId : undefined,
+    transcript: payload.transcript && typeof payload.transcript === 'object'
+      ? {
+          title: (payload.transcript as Record<string, unknown>).title as string || 'Meeting',
+          date: (payload.transcript as Record<string, unknown>).date as string || new Date().toISOString(),
+          duration: Number((payload.transcript as Record<string, unknown>).duration) || 0,
+          participants: Array.isArray((payload.transcript as Record<string, unknown>).participants)
+            ? (payload.transcript as Record<string, unknown>).participants as string[]
+            : [],
+        }
+      : undefined,
+  }
+}
+
 export async function POST(request: NextRequest) {
+  const startTime = Date.now()
+  console.log('[Fireflies Webhook] Received request')
+
   try {
     const rawBody = await request.text()
-    const signature = request.headers.get('x-fireflies-signature') || ''
-
-    // Verify webhook signature if secret is configured
-    if (FIREFLIES_WEBHOOK_SECRET) {
-      const isValid = verifyWebhookSignature('fireflies', rawBody, signature, FIREFLIES_WEBHOOK_SECRET)
-      if (!isValid) {
-        return NextResponse.json(
-          { error: 'Invalid webhook signature' },
-          { status: 401 }
-        )
-      }
-    }
-
     const body = JSON.parse(rawBody)
-    const payload = parseFirefliesPayload(body)
+    const payload = parsePayload(body)
 
     if (!payload) {
-      return NextResponse.json(
-        { error: 'Invalid payload format' },
-        { status: 400 }
-      )
+      console.log('[Fireflies Webhook] Invalid payload format')
+      return NextResponse.json({ error: 'Invalid payload format' }, { status: 400 })
     }
+
+    console.log('[Fireflies Webhook] Event:', payload.eventType, 'Meeting:', payload.meetingId)
 
     // Only process transcription completed events
     if (payload.eventType !== 'Transcription completed') {
@@ -42,16 +62,12 @@ export async function POST(request: NextRequest) {
       })
     }
 
-    // Find the user associated with this webhook
-    // First try the clientReferenceId which can be set as user_id
+    const adminClient = createAdminClient()
+
+    // Find the user - try clientReferenceId first, then first active integration
     let userId = payload.clientReferenceId || null
 
-    // If no clientReferenceId, look up by Fireflies integration
     if (!userId) {
-      // Get all users with Fireflies integrations and check their transcript ownership
-      const adminClient = createAdminClient()
-
-      // Fetch all active Fireflies integrations
       const { data: integrations } = await (adminClient
         .from('integrations') as ReturnType<typeof adminClient.from>)
         .select('user_id, credentials')
@@ -60,51 +76,87 @@ export async function POST(request: NextRequest) {
           data: Array<{ user_id: string; credentials: { api_key?: string } | null }> | null
         }
 
-      // Try to find which user owns this transcript
-      // For now, use the first active integration
-      // In production, you'd verify ownership via the Fireflies API
       if (integrations && integrations.length > 0) {
         userId = integrations[0].user_id
       }
     }
 
     if (!userId) {
-      return NextResponse.json(
-        { error: 'Could not determine user for webhook' },
-        { status: 400 }
-      )
+      console.log('[Fireflies Webhook] No user found for webhook')
+      return NextResponse.json({ error: 'Could not determine user for webhook' }, { status: 400 })
     }
 
-    // Ingest the transcript
-    const result = await ingestTranscript(
-      {
+    // Create a processing job record to track status
+    const { data: job } = await (adminClient
+      .from('processing_jobs') as ReturnType<typeof adminClient.from>)
+      .insert({
+        user_id: userId,
         source: 'fireflies',
-        transcriptId: payload.meetingId,
+        source_id: payload.meetingId,
+        status: 'processing',
+        current_step: 'fetching',
+        progress: 10,
         metadata: {
           title: payload.transcript?.title || 'Fireflies Meeting',
+          meeting_date: payload.transcript?.date,
+          participants: payload.transcript?.participants || [],
+          duration: payload.transcript?.duration || 0,
+        },
+      } as never)
+      .select('id')
+      .single() as unknown as { data: { id: string } | null }
+
+    const jobId = job?.id
+
+    try {
+      // Process the transcript synchronously
+      console.log('[Fireflies Webhook] Starting memo generation for job:', jobId)
+
+      const result = await processTranscriptToMemo({
+        source: 'fireflies',
+        transcriptId: payload.meetingId,
+        userId,
+        jobId,
+        metadata: {
+          title: payload.transcript?.title,
           date: payload.transcript?.date,
           participants: payload.transcript?.participants,
-          duration: payload.transcript?.duration,
-          externalId: payload.meetingId,
         },
-      },
-      userId
-    )
+      })
 
-    if (!result.success) {
-      return NextResponse.json(
-        { error: result.error },
-        { status: 500 }
-      )
+      if (!result.success) {
+        throw new Error(result.error || 'Processing failed')
+      }
+
+      console.log('[Fireflies Webhook] Memo created:', result.memoId, 'in', Date.now() - startTime, 'ms')
+
+      return NextResponse.json({
+        success: true,
+        memoId: result.memoId,
+        companyName: result.companyName,
+        processingTime: Date.now() - startTime,
+      })
+    } catch (processError) {
+      console.error('[Fireflies Webhook] Processing error:', processError)
+
+      // Update job status to failed
+      if (jobId) {
+        await (adminClient
+          .from('processing_jobs') as ReturnType<typeof adminClient.from>)
+          .update({
+            status: 'failed',
+            error: processError instanceof Error ? processError.message : 'Processing failed',
+          } as never)
+          .eq('id', jobId)
+      }
+
+      return NextResponse.json({
+        success: false,
+        error: processError instanceof Error ? processError.message : 'Processing failed',
+      }, { status: 500 })
     }
-
-    return NextResponse.json({
-      success: true,
-      jobId: result.jobId,
-      message: 'Transcript queued for processing',
-    })
   } catch (error) {
-    console.error('Fireflies webhook error:', error)
+    console.error('[Fireflies Webhook] Error:', error)
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }

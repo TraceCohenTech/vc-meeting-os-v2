@@ -1,142 +1,675 @@
 import { createAdminClient } from '@/lib/supabase/server'
-import { generateText } from 'ai'
-import { createGroq } from '@ai-sdk/groq'
+import { createMemoInDrive } from '@/lib/google/drive'
 
-const groq = createGroq({
-  apiKey: process.env.GROQ_API_KEY,
-})
+// Use direct fetch to Groq API to avoid @ai-sdk header issues
+const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions'
+const GROQ_MODEL = 'llama-3.3-70b-versatile'
 
-const PROCESSING_STEPS = [
-  { step: 'fetching', progress: 10 },
-  { step: 'analyzing', progress: 30 },
-  { step: 'extracting', progress: 50 },
-  { step: 'generating', progress: 70 },
-  { step: 'saving', progress: 90 },
-  { step: 'completed', progress: 100 },
-] as const
+interface ProcessInput {
+  source: 'fireflies' | 'granola' | 'manual'
+  transcriptId?: string
+  transcriptContent?: string
+  userId: string
+  jobId?: string
+  metadata?: {
+    title?: string
+    date?: string
+    participants?: string[]
+  }
+}
+
+interface ProcessResult {
+  success: boolean
+  memoId?: string
+  companyName?: string
+  error?: string
+}
 
 interface DbResult<T> {
   data: T | null
   error: Error | null
 }
 
+/**
+ * Call Groq API directly to avoid SDK header issues
+ */
+async function callGroq(prompt: string, systemPrompt?: string): Promise<string> {
+  // Trim the API key to remove any whitespace that might cause header issues
+  const apiKey = (process.env.GROQ_API_KEY || '').trim()
+
+  if (!apiKey) {
+    throw new Error('GROQ_API_KEY not configured')
+  }
+
+  const messages = []
+  if (systemPrompt) {
+    messages.push({ role: 'system', content: systemPrompt })
+  }
+  messages.push({ role: 'user', content: prompt })
+
+  console.log('[Groq] Calling API...')
+
+  const response = await fetch(GROQ_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      messages,
+      temperature: 0.7,
+      max_tokens: 4096,
+    }),
+  })
+
+  if (!response.ok) {
+    const errorText = await response.text()
+    console.error('[Groq API Error]', response.status, errorText)
+    throw new Error(`Groq API error: ${response.status} - ${errorText.slice(0, 200)}`)
+  }
+
+  const data = await response.json()
+  const content = data.choices?.[0]?.message?.content || ''
+  console.log('[Groq] Response received, length:', content.length)
+  return content
+}
+
+/**
+ * Fetch transcript from Fireflies API
+ */
+async function fetchFirefliesTranscript(
+  apiKey: string,
+  transcriptId: string
+): Promise<{ title: string; date: string; transcript: string; participants: string[] }> {
+  // Trim the API key to remove any whitespace
+  const cleanApiKey = apiKey.trim()
+
+  console.log('[Fireflies] Fetching transcript:', transcriptId)
+
+  const response = await fetch('https://api.fireflies.ai/graphql', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${cleanApiKey}`,
+    },
+    body: JSON.stringify({
+      query: `
+        query Transcript($id: String!) {
+          transcript(id: $id) {
+            title
+            date
+            sentences { text speaker_name }
+          }
+        }
+      `,
+      variables: { id: transcriptId },
+    }),
+  })
+
+  if (!response.ok) {
+    const errorText = await response.text()
+    console.error('[Fireflies API Error]', response.status, errorText)
+    throw new Error(`Fireflies API error: ${response.status}`)
+  }
+
+  const data = await response.json()
+  if (data.errors) {
+    console.error('[Fireflies GraphQL Error]', data.errors)
+    throw new Error(data.errors[0]?.message || 'Fireflies API error')
+  }
+
+  if (!data?.data?.transcript) {
+    throw new Error('Fireflies transcript not found')
+  }
+
+  const ffTranscript = data.data.transcript
+  const transcript = ffTranscript.sentences
+    .map((s: { speaker_name: string; text: string }) => `${s.speaker_name}: ${s.text}`)
+    .join('\n')
+
+  const speakers = new Set(ffTranscript.sentences.map((s: { speaker_name: string }) => s.speaker_name))
+
+  console.log('[Fireflies] Transcript fetched, length:', transcript.length, 'speakers:', speakers.size)
+
+  return {
+    title: ffTranscript.title,
+    date: ffTranscript.date,
+    transcript,
+    participants: Array.from(speakers) as string[],
+  }
+}
+
+/**
+ * Detect meeting type from transcript
+ */
+async function detectMeetingType(transcript: string): Promise<string> {
+  const prompt = `Classify this meeting transcript into one of these categories:
+- founder-pitch: A startup pitch meeting with founders
+- customer-call: Customer discovery or sales call
+- partner-meeting: Partnership or BD discussion
+- internal: Internal team meeting
+- board-meeting: Board or investor update
+- due-diligence: Due diligence or reference call
+
+Return ONLY the category ID (e.g., "founder-pitch"). If unsure, return "internal".
+
+Transcript excerpt:
+${transcript.slice(0, 2000)}`
+
+  try {
+    const result = await callGroq(prompt)
+    const category = result.trim().toLowerCase().replace(/['"]/g, '')
+
+    const validTypes = ['founder-pitch', 'customer-call', 'partner-meeting', 'internal', 'board-meeting', 'due-diligence']
+    if (validTypes.includes(category)) {
+      return category
+    }
+
+    // Try to find a match
+    for (const type of validTypes) {
+      if (category.includes(type)) {
+        return type
+      }
+    }
+
+    return 'internal'
+  } catch (error) {
+    console.error('[Meeting Type Detection Error]', error)
+    return 'internal'
+  }
+}
+
+/**
+ * Detect company from transcript
+ */
+async function detectCompany(
+  transcript: string,
+  existingCompanies: Array<{ id: string; name: string }>
+): Promise<{ name: string; existingId?: string; confidence: number; metadata: Record<string, string> } | null> {
+  const companyList = existingCompanies.length > 0
+    ? `Known companies in the system: ${existingCompanies.map(c => c.name).join(', ')}`
+    : ''
+
+  const prompt = `Extract company information from this meeting transcript.
+
+${companyList}
+
+Return a JSON object with:
+- name: Company name being discussed (or null if not identifiable)
+- isExisting: true if it matches one of the known companies listed above
+- confidence: 0-1 confidence score
+- website: Company website if mentioned
+- industry: Industry if identifiable
+- stage: Funding stage if mentioned (seed, series-a, etc.)
+
+Return ONLY valid JSON, no other text.
+
+Transcript:
+${transcript.slice(0, 3000)}`
+
+  try {
+    const result = await callGroq(prompt)
+
+    // Try to parse JSON from the response
+    const jsonMatch = result.match(/\{[\s\S]*\}/)
+    if (!jsonMatch) return null
+
+    const parsed = JSON.parse(jsonMatch[0])
+    if (!parsed.name || parsed.name === 'null') return null
+
+    // Check for existing company match
+    let existingId: string | undefined
+    if (parsed.isExisting) {
+      const match = existingCompanies.find(
+        c => c.name.toLowerCase() === parsed.name.toLowerCase()
+      )
+      if (match) existingId = match.id
+    }
+
+    return {
+      name: parsed.name,
+      existingId,
+      confidence: parsed.confidence || 0.5,
+      metadata: {
+        website: parsed.website || '',
+        industry: parsed.industry || '',
+        stage: parsed.stage || '',
+      },
+    }
+  } catch (error) {
+    console.error('[Company Detection Error]', error)
+    return null
+  }
+}
+
+/**
+ * Generate memo content from transcript
+ */
+async function generateMemoContent(transcript: string, meetingType: string): Promise<string> {
+  const systemPrompt = `You are an AI assistant for venture capital investors. Generate professional, structured meeting memos from transcripts. Be concise and focus on actionable insights.`
+
+  const templatePrompts: Record<string, string> = {
+    'founder-pitch': `Generate a VC investment memo from this founder pitch meeting. Include these sections:
+
+## Executive Summary
+2-3 sentence overview of the company and meeting
+
+## Company Overview
+- Company name and what they do
+- Stage and funding history
+
+## Problem & Solution
+- Problem being solved
+- Their solution/product
+
+## Market Opportunity
+- Target market size
+- Go-to-market strategy
+
+## Business Model
+- How they make money
+- Key metrics
+
+## Team
+- Founders and backgrounds
+- Key hires needed
+
+## Traction
+- Current metrics
+- Growth trajectory
+
+## Investment Ask
+- Amount raising
+- Use of funds
+
+## Key Concerns
+- Risks and red flags
+
+## Next Steps
+- Follow-up actions needed`,
+
+    'customer-call': `Generate a customer discovery memo. Include:
+
+## Customer Overview
+- Who they are
+- Company/role
+
+## Key Pain Points
+- Problems they're experiencing
+
+## Current Solutions
+- What they use today
+- Limitations
+
+## Feature Requests
+- What they want
+
+## Willingness to Pay
+- Budget and urgency
+
+## Next Steps`,
+
+    'due-diligence': `Generate a due diligence memo. Include:
+
+## Reference Overview
+- Who provided the reference
+- Relationship to company
+
+## Key Findings
+- What they said about the company/team
+
+## Strengths
+- Positive aspects mentioned
+
+## Concerns
+- Any red flags or worries
+
+## Recommendation
+- Overall assessment`,
+
+    'internal': `Generate a meeting summary. Include:
+
+## Meeting Purpose
+- Why we met
+
+## Key Discussion Points
+- Main topics covered
+
+## Decisions Made
+- What was decided
+
+## Action Items
+- Who does what by when
+
+## Next Steps`,
+  }
+
+  const prompt = `${templatePrompts[meetingType] || templatePrompts['internal']}
+
+Be concise but thorough. Extract specific numbers, quotes, and facts when available.
+If information isn't available for a section, write "Not discussed in meeting."
+
+Transcript:
+${transcript.slice(0, 6000)}`
+
+  return await callGroq(prompt, systemPrompt)
+}
+
+/**
+ * Generate a brief summary
+ */
+async function generateSummary(transcript: string): Promise<string> {
+  return await callGroq(`Summarize this meeting in 2-3 sentences. Be specific about what was discussed and any key outcomes:\n\n${transcript.slice(0, 2000)}`)
+}
+
+/**
+ * Extract action items as tasks
+ */
+async function extractTasks(memoContent: string): Promise<Array<{ title: string; priority: string }>> {
+  const prompt = `Extract action items from this meeting memo. Return a JSON array with:
+- title: Brief task description (max 100 chars)
+- priority: "low", "medium", or "high"
+
+Return ONLY a valid JSON array. If no tasks, return [].
+
+Memo:
+${memoContent}`
+
+  try {
+    const result = await callGroq(prompt)
+    const jsonMatch = result.match(/\[[\s\S]*\]/)
+    if (!jsonMatch) return []
+    return JSON.parse(jsonMatch[0])
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Update job progress in the database
+ */
+async function updateJobProgress(
+  adminClient: ReturnType<typeof createAdminClient>,
+  jobId: string,
+  step: string,
+  progress: number,
+  status: 'processing' | 'completed' | 'failed' = 'processing',
+  result?: object,
+  error?: string
+) {
+  await (adminClient.from('processing_jobs') as ReturnType<typeof adminClient.from>)
+    .update({
+      status,
+      current_step: step,
+      progress,
+      result: result || {},
+      error: error || null,
+      updated_at: new Date().toISOString(),
+    } as never)
+    .eq('id', jobId)
+}
+
+/**
+ * Main processing function - converts transcript to memo
+ * This is the unified entry point for all transcript processing
+ */
+export async function processTranscriptToMemo(input: ProcessInput): Promise<ProcessResult> {
+  const adminClient = createAdminClient()
+  const { source, transcriptId, transcriptContent, userId, jobId, metadata } = input
+
+  console.log(`[Processing] Starting for user ${userId}, source: ${source}, jobId: ${jobId}`)
+
+  try {
+    let transcript = transcriptContent || ''
+    let meetingTitle = metadata?.title || 'Meeting Memo'
+    let meetingDate = metadata?.date || new Date().toISOString()
+    let participants = metadata?.participants || []
+
+    // Step 1: Fetch transcript if needed
+    if (source === 'fireflies' && transcriptId && !transcript) {
+      if (jobId) await updateJobProgress(adminClient, jobId, 'fetching', 10)
+
+      // Get Fireflies API key
+      const { data: integration } = await (adminClient
+        .from('integrations') as ReturnType<typeof adminClient.from>)
+        .select('credentials')
+        .eq('user_id', userId)
+        .eq('provider', 'fireflies')
+        .eq('status', 'active')
+        .single() as unknown as DbResult<{ credentials: { api_key?: string } | null }>
+
+      if (!integration?.credentials?.api_key) {
+        throw new Error('Fireflies API key not configured. Please add your API key in Settings.')
+      }
+
+      const ffData = await fetchFirefliesTranscript(integration.credentials.api_key, transcriptId)
+      transcript = ffData.transcript
+      meetingTitle = ffData.title || meetingTitle
+      meetingDate = ffData.date || meetingDate
+      participants = ffData.participants
+    }
+
+    if (!transcript) {
+      throw new Error('No transcript content available')
+    }
+
+    console.log(`[Processing] Transcript length: ${transcript.length} chars`)
+
+    // Step 2: Detect meeting type
+    if (jobId) await updateJobProgress(adminClient, jobId, 'analyzing', 25)
+    console.log(`[Processing] Detecting meeting type...`)
+    const meetingType = await detectMeetingType(transcript)
+    console.log(`[Processing] Meeting type: ${meetingType}`)
+
+    // Step 3: Detect company
+    if (jobId) await updateJobProgress(adminClient, jobId, 'extracting', 40)
+    const { data: existingCompanies } = await (adminClient
+      .from('companies') as ReturnType<typeof adminClient.from>)
+      .select('id, name')
+      .eq('user_id', userId) as unknown as { data: Array<{ id: string; name: string }> | null }
+
+    console.log(`[Processing] Detecting company...`)
+    const companyDetection = await detectCompany(transcript, existingCompanies || [])
+
+    let companyId: string | null = null
+    let companyName: string | null = null
+
+    if (companyDetection && companyDetection.confidence > 0.6) {
+      if (companyDetection.existingId) {
+        companyId = companyDetection.existingId
+        companyName = companyDetection.name
+        console.log(`[Processing] Matched existing company: ${companyName}`)
+      } else {
+        // Create new company
+        const { data: newCompany } = await (adminClient
+          .from('companies') as ReturnType<typeof adminClient.from>)
+          .insert({
+            user_id: userId,
+            name: companyDetection.name,
+            website: companyDetection.metadata.website || null,
+            industry: companyDetection.metadata.industry || null,
+            stage: companyDetection.metadata.stage || null,
+          } as never)
+          .select('id')
+          .single() as unknown as DbResult<{ id: string }>
+
+        if (newCompany) {
+          companyId = newCompany.id
+          companyName = companyDetection.name
+          console.log(`[Processing] Created new company: ${companyName}`)
+        }
+      }
+    }
+
+    // Step 4: Generate memo content
+    if (jobId) await updateJobProgress(adminClient, jobId, 'generating', 60)
+    console.log(`[Processing] Generating memo content...`)
+    const memoContent = await generateMemoContent(transcript, meetingType)
+
+    // Step 5: Generate summary
+    if (jobId) await updateJobProgress(adminClient, jobId, 'summarizing', 75)
+    console.log(`[Processing] Generating summary...`)
+    const summary = await generateSummary(transcript)
+
+    // Step 6: Extract tasks
+    console.log(`[Processing] Extracting tasks...`)
+    const tasks = await extractTasks(memoContent)
+
+    // Step 7: Save memo
+    if (jobId) await updateJobProgress(adminClient, jobId, 'saving', 85)
+
+    // Get default folder
+    const { data: defaultFolder } = await (adminClient
+      .from('folders') as ReturnType<typeof adminClient.from>)
+      .select('id')
+      .eq('user_id', userId)
+      .eq('is_default', true)
+      .single() as unknown as DbResult<{ id: string }>
+
+    const { data: memo, error: memoError } = await (adminClient
+      .from('memos') as ReturnType<typeof adminClient.from>)
+      .insert({
+        user_id: userId,
+        folder_id: defaultFolder?.id || null,
+        company_id: companyId,
+        source,
+        source_id: transcriptId || null,
+        title: meetingTitle,
+        content: memoContent,
+        summary,
+        transcript,
+        meeting_date: meetingDate,
+        participants,
+        meeting_type: meetingType,
+        status: 'completed',
+        metadata: {
+          processing_completed_at: new Date().toISOString(),
+        },
+      } as never)
+      .select('id')
+      .single() as unknown as DbResult<{ id: string }>
+
+    if (memoError || !memo) {
+      throw new Error(memoError?.message || 'Failed to save memo')
+    }
+
+    console.log(`[Processing] Memo saved: ${memo.id}`)
+
+    // Step 8: Save tasks
+    if (tasks.length > 0) {
+      await (adminClient.from('tasks') as ReturnType<typeof adminClient.from>).insert(
+        tasks.map((t) => ({
+          user_id: userId,
+          memo_id: memo.id,
+          company_id: companyId,
+          title: t.title,
+          priority: t.priority || 'medium',
+          status: 'pending',
+        })) as never
+      )
+      console.log(`[Processing] Created ${tasks.length} tasks`)
+    }
+
+    // Step 9: File to Google Drive
+    if (jobId) await updateJobProgress(adminClient, jobId, 'filing', 95)
+
+    try {
+      const { data: googleIntegration } = await (adminClient
+        .from('integrations') as ReturnType<typeof adminClient.from>)
+        .select('credentials')
+        .eq('user_id', userId)
+        .eq('provider', 'google')
+        .eq('status', 'active')
+        .single() as unknown as DbResult<{ credentials: { access_token?: string; refresh_token?: string; drive_folder_id?: string } | null }>
+
+      if (googleIntegration?.credentials?.access_token) {
+        console.log(`[Processing] Filing to Google Drive...`)
+        const driveResult = await createMemoInDrive(
+          googleIntegration.credentials.access_token,
+          googleIntegration.credentials.refresh_token,
+          googleIntegration.credentials.drive_folder_id,
+          userId,
+          {
+            title: meetingTitle,
+            content: memoContent,
+            summary,
+            meetingDate,
+            companyName,
+          }
+        )
+
+        if (driveResult) {
+          await (adminClient.from('memos') as ReturnType<typeof adminClient.from>)
+            .update({
+              drive_file_id: driveResult.fileId,
+              drive_web_view_link: driveResult.webViewLink,
+            } as never)
+            .eq('id', memo.id)
+          console.log(`[Processing] Filed to Google Drive: ${driveResult.webViewLink}`)
+        }
+      }
+    } catch (driveError) {
+      console.error('[Processing] Drive filing error (non-fatal):', driveError)
+      // Don't fail the whole process for Drive errors
+    }
+
+    // Step 10: Mark job as completed
+    if (jobId) {
+      await updateJobProgress(adminClient, jobId, 'completed', 100, 'completed', {
+        memo_id: memo.id,
+        company_id: companyId,
+        company_name: companyName,
+      })
+    }
+
+    // Mark transcript as imported
+    if (source === 'fireflies' && transcriptId) {
+      await (adminClient
+        .from('imported_transcripts') as ReturnType<typeof adminClient.from>)
+        .upsert({
+          user_id: userId,
+          source: 'fireflies',
+          source_id: transcriptId,
+          memo_id: memo.id,
+        } as never, { onConflict: 'user_id,source,source_id' })
+    }
+
+    console.log(`[Processing] Complete! Memo ID: ${memo.id}`)
+
+    return {
+      success: true,
+      memoId: memo.id,
+      companyName: companyName || undefined,
+    }
+  } catch (error) {
+    console.error('[Processing] Error:', error)
+
+    if (jobId) {
+      await updateJobProgress(
+        adminClient,
+        jobId,
+        'failed',
+        0,
+        'failed',
+        undefined,
+        error instanceof Error ? error.message : 'Processing failed'
+      )
+    }
+
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Processing failed',
+    }
+  }
+}
+
+// Legacy exports for backward compatibility
 export interface QueuePayload {
   transcriptId?: string
   source: string
   transcriptContent?: string
   title?: string
-}
-
-interface ProcessingJobRow {
-  id: string
-  user_id: string
-  source: string
-  source_id: string | null
-  status: 'pending' | 'processing' | 'completed' | 'failed'
-  metadata: Record<string, unknown> | null
-  updated_at?: string
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-async function updateIntegrationStatus(
-  adminClient: ReturnType<typeof createAdminClient>,
-  userId: string,
-  provider: string,
-  status: 'active' | 'inactive' | 'error',
-  errorMessage?: string | null
-) {
-  await (adminClient.from('integrations') as ReturnType<typeof adminClient.from>)
-    .update({
-      status,
-      error_message: errorMessage || null,
-      last_sync_at: status === 'active' ? new Date().toISOString() : null,
-    } as never)
-    .eq('user_id', userId)
-    .eq('provider', provider)
-}
-
-async function fetchFirefliesTranscript(
-  apiKey: string,
-  transcriptId: string
-): Promise<{ title: string; date: string; sentences: Array<{ speaker_name: string; text: string }> }> {
-  const maxAttempts = 3
-  let lastError: Error | null = null
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      const response = await fetch('https://api.fireflies.ai/graphql', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          query: `
-            query Transcript($id: String!) {
-              transcript(id: $id) {
-                title
-                date
-                sentences { text speaker_name }
-              }
-            }
-          `,
-          variables: { id: transcriptId },
-        }),
-      })
-
-      if (!response.ok) {
-        throw new Error(`Fireflies API error: ${response.status}`)
-      }
-
-      const data = await response.json()
-      if (!data?.data?.transcript) {
-        throw new Error('Fireflies transcript not found')
-      }
-
-      return data.data.transcript
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error('Fireflies fetch failed')
-      if (attempt < maxAttempts) {
-        await sleep(500 * attempt)
-      }
-    }
-  }
-
-  throw lastError || new Error('Fireflies fetch failed')
-}
-
-function parsePayload(job: ProcessingJobRow): QueuePayload {
-  const metadata = job.metadata || {}
-  return {
-    transcriptId: job.source_id || undefined,
-    source: job.source,
-    transcriptContent:
-      typeof metadata.transcript_content === 'string' ? metadata.transcript_content : undefined,
-    title: typeof metadata.title === 'string' ? metadata.title : undefined,
-  }
-}
-
-async function updateJobProgress(
-  adminClient: ReturnType<typeof createAdminClient>,
-  jobId: string,
-  stepIndex: number,
-  status: 'processing' | 'completed' | 'failed' = 'processing',
-  result?: object,
-  error?: string
-) {
-  const step = PROCESSING_STEPS[stepIndex]
-  await (adminClient.from('processing_jobs') as ReturnType<typeof adminClient.from>)
-    .update({
-      status,
-      current_step: step?.step || null,
-      progress: step?.progress || 0,
-      result: result || {},
-      error: error || null,
-    } as never)
-    .eq('id', jobId)
 }
 
 export async function enqueueProcessingJob(userId: string, payload: QueuePayload) {
@@ -166,401 +699,14 @@ export async function enqueueProcessingJob(userId: string, payload: QueuePayload
   return job.id
 }
 
-async function claimJob(
-  adminClient: ReturnType<typeof createAdminClient>,
-  jobId: string
-): Promise<boolean> {
-  const { data } = await (adminClient
-    .from('processing_jobs') as ReturnType<typeof adminClient.from>)
-    .update({
-      status: 'processing',
-      current_step: 'fetching',
-      progress: 10,
-      error: null,
-    } as never)
-    .eq('id', jobId)
-    .eq('status', 'pending')
-    .select('id') as unknown as { data: Array<{ id: string }> | null }
-
-  return Boolean(data && data.length > 0)
-}
-
-async function processTranscript(
-  adminClient: ReturnType<typeof createAdminClient>,
-  jobId: string,
-  userId: string,
-  params: QueuePayload
-) {
-  try {
-    await updateJobProgress(adminClient, jobId, 0)
-
-    let transcript = params.transcriptContent || ''
-    let meetingTitle = params.title || 'Meeting Memo'
-    let meetingDate = new Date().toISOString()
-
-    if (params.source === 'fireflies' && params.transcriptId) {
-      const { data: integration } = await (adminClient
-        .from('integrations') as ReturnType<typeof adminClient.from>)
-        .select('credentials')
-        .eq('user_id', userId)
-        .eq('provider', 'fireflies')
-        .single() as unknown as DbResult<{ credentials: { api_key?: string } | null }>
-
-      const creds = integration?.credentials
-      if (!creds?.api_key) {
-        await updateIntegrationStatus(
-          adminClient,
-          userId,
-          'fireflies',
-          'error',
-          'Missing Fireflies API key'
-        )
-        await updateJobProgress(
-          adminClient,
-          jobId,
-          0,
-          'failed',
-          {},
-          'Fireflies integration missing API key'
-        )
-        return
-      }
-
-      try {
-        const ffTranscript = await fetchFirefliesTranscript(creds.api_key, params.transcriptId)
-        meetingTitle = ffTranscript.title
-        meetingDate = ffTranscript.date
-        transcript = ffTranscript.sentences
-          .map((s) => `${s.speaker_name}: ${s.text}`)
-          .join('\n')
-
-        await updateIntegrationStatus(adminClient, userId, 'fireflies', 'active', null)
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Fireflies fetch failed'
-        await updateIntegrationStatus(adminClient, userId, 'fireflies', 'error', message)
-        await updateJobProgress(
-          adminClient,
-          jobId,
-          0,
-          'failed',
-          {},
-          `Fireflies fetch failed: ${message}`
-        )
-        return
-      }
-    }
-
-    if (!transcript) {
-      await updateJobProgress(adminClient, jobId, 0, 'failed', {}, 'No transcript content')
-      return
-    }
-
-    await updateJobProgress(adminClient, jobId, 1)
-    await updateJobProgress(adminClient, jobId, 2)
-
-    const companyExtraction = await generateText({
-      model: groq('llama-3.3-70b-versatile'),
-      prompt: `Extract company information from this meeting transcript. If this is a startup pitch or discussion about a company, extract:
-- company_name: The company being discussed
-- website: Company website if mentioned
-- stage: Investment stage (idea, pre-seed, seed, series-a, etc.)
-- industry: Company industry/sector
-- founders: Array of founder names and titles
-
-If no company is discussed, return null.
-
-Return ONLY valid JSON, no other text.
-
-Transcript:
-${transcript.slice(0, 4000)}`,
-    })
-
-    let companyInfo: {
-      company_name: string
-      website?: string
-      stage?: string
-      industry?: string
-      founders?: Array<{ name: string; title?: string }>
-    } | null = null
-
-    try {
-      const parsed = JSON.parse(companyExtraction.text)
-      if (parsed && parsed.company_name) {
-        companyInfo = parsed
-      }
-    } catch {
-      // Ignore malformed extraction output.
-    }
-
-    let companyId: string | null = null
-    if (companyInfo) {
-      const { data: existingCompany } = await (adminClient
-        .from('companies') as ReturnType<typeof adminClient.from>)
-        .select('id')
-        .eq('user_id', userId)
-        .ilike('name', companyInfo.company_name)
-        .single() as unknown as DbResult<{ id: string }>
-
-      if (existingCompany) {
-        companyId = existingCompany.id
-      } else {
-        const { data: newCompany } = await (adminClient
-          .from('companies') as ReturnType<typeof adminClient.from>)
-          .insert({
-            user_id: userId,
-            name: companyInfo.company_name,
-            website: companyInfo.website || null,
-            stage: companyInfo.stage || null,
-            industry: companyInfo.industry || null,
-            founders: companyInfo.founders || [],
-          } as never)
-          .select('id')
-          .single() as unknown as DbResult<{ id: string }>
-
-        if (newCompany) {
-          companyId = newCompany.id
-        }
-      }
-    }
-
-    await updateJobProgress(adminClient, jobId, 3)
-
-    const memoGeneration = await generateText({
-      model: groq('llama-3.3-70b-versatile'),
-      system: `You are an expert VC analyst. Generate a structured investment memo from meeting transcripts.
-Format the memo with clear sections:
-- Executive Summary (2-3 sentences)
-- Key Discussion Points
-- Product/Business Model
-- Team Assessment (if applicable)
-- Concerns/Risks
-- Action Items
-- Investment Recommendation (if applicable)
-
-Be concise and focus on actionable insights.`,
-      prompt: `Generate an investment memo from this meeting transcript:\n\n${transcript.slice(0, 6000)}`,
-    })
-
-    const summaryGeneration = await generateText({
-      model: groq('llama-3.3-70b-versatile'),
-      prompt: `Summarize this meeting in 1-2 sentences:\n\n${transcript.slice(0, 2000)}`,
-    })
-
-    const tasksExtraction = await generateText({
-      model: groq('llama-3.3-70b-versatile'),
-      prompt: `Extract action items from this meeting memo. Return a JSON array of tasks with:
-- title: Brief task description
-- priority: low, medium, or high
-- due_date: ISO date string if mentioned, null otherwise
-
-Return ONLY a valid JSON array, no other text. If no tasks, return [].
-
-Memo:
-${memoGeneration.text}`,
-    })
-
-    await updateJobProgress(adminClient, jobId, 4)
-
-    const { data: defaultFolder } = await (adminClient
-      .from('folders') as ReturnType<typeof adminClient.from>)
-      .select('id')
-      .eq('user_id', userId)
-      .eq('is_default', true)
-      .single() as unknown as DbResult<{ id: string }>
-
-    let memoId: string | null = null
-    if (params.transcriptId) {
-      const { data: memo, error: memoError } = await (adminClient
-        .from('memos') as ReturnType<typeof adminClient.from>)
-        .select('id')
-        .eq('user_id', userId)
-        .eq('source', params.source)
-        .eq('source_id', params.transcriptId)
-        .maybeSingle() as unknown as DbResult<{ id: string } | null>
-
-      if (memoError) {
-        await updateJobProgress(
-          adminClient,
-          jobId,
-          4,
-          'failed',
-          {},
-          memoError?.message || 'Failed to save memo'
-        )
-        return
-      }
-
-      memoId = memo?.id || null
-    }
-
-    if (!memoId) {
-      const { data: newMemo, error: newMemoError } = await (adminClient
-        .from('memos') as ReturnType<typeof adminClient.from>)
-        .insert({
-          user_id: userId,
-          folder_id: defaultFolder?.id || null,
-          company_id: companyId,
-          source: params.source,
-          source_id: params.transcriptId || null,
-          title: meetingTitle,
-          content: memoGeneration.text,
-          summary: summaryGeneration.text,
-          meeting_date: meetingDate,
-        } as never)
-        .select('id')
-        .single() as unknown as DbResult<{ id: string }>
-
-      if (newMemoError || !newMemo) {
-        await updateJobProgress(
-          adminClient,
-          jobId,
-          4,
-          'failed',
-          {},
-          newMemoError?.message || 'Failed to save memo'
-        )
-        return
-      }
-
-      memoId = newMemo.id
-    }
-
-    await (adminClient.from('memo_revisions') as ReturnType<typeof adminClient.from>).insert({
-      memo_id: memoId,
-      user_id: userId,
-      title: meetingTitle,
-      content: memoGeneration.text,
-      summary: summaryGeneration.text,
-      meeting_date: meetingDate,
-      metadata: {
-        source: params.source,
-        source_id: params.transcriptId || null,
-      },
-    } as never)
-
-    await (adminClient.from('memos') as ReturnType<typeof adminClient.from>)
-      .update({
-        folder_id: defaultFolder?.id || null,
-        company_id: companyId,
-        title: meetingTitle,
-        content: memoGeneration.text,
-        summary: summaryGeneration.text,
-        meeting_date: meetingDate,
-      } as never)
-      .eq('id', memoId)
-
-    try {
-      const tasks = JSON.parse(tasksExtraction.text)
-      if (Array.isArray(tasks) && tasks.length > 0) {
-        const { data: existingTasks } = await (adminClient
-          .from('tasks') as ReturnType<typeof adminClient.from>)
-          .select('title')
-          .eq('memo_id', memoId)
-          .eq('user_id', userId) as unknown as { data: Array<{ title: string }> | null }
-
-        const existingSet = new Set(
-          (existingTasks || [])
-            .map((t) => t.title.trim().toLowerCase())
-            .filter(Boolean)
-        )
-
-        const deduped = tasks.filter((t: { title?: string }) => {
-          const title = (t.title || '').trim().toLowerCase()
-          return title && !existingSet.has(title)
-        })
-
-        if (deduped.length > 0) {
-          await (adminClient.from('tasks') as ReturnType<typeof adminClient.from>).insert(
-            deduped.map((t: { title: string; priority?: string; due_date?: string }) => ({
-              user_id: userId,
-              memo_id: memoId,
-              company_id: companyId,
-              title: t.title,
-              priority: t.priority || 'medium',
-              due_date: t.due_date || null,
-              status: 'pending',
-            })) as never
-          )
-        }
-      }
-    } catch {
-      // Ignore malformed task extraction output.
-    }
-
-    await updateJobProgress(adminClient, jobId, 5, 'completed', {
-      memo_id: memoId,
-      company_id: companyId,
-    })
-  } catch (error) {
-    await updateJobProgress(
-      adminClient,
-      jobId,
-      0,
-      'failed',
-      {},
-      error instanceof Error ? error.message : 'Processing failed'
-    )
-  }
-}
-
-export async function processQueuedJob(jobId: string) {
-  const adminClient = createAdminClient()
-
-  const { data: job } = await (adminClient
-    .from('processing_jobs') as ReturnType<typeof adminClient.from>)
-    .select('id, user_id, source, source_id, status, metadata')
-    .eq('id', jobId)
-    .single() as unknown as { data: ProcessingJobRow | null }
-
-  if (!job) {
-    return { processed: false, reason: 'job_not_found' }
-  }
-
-  const claimed = await claimJob(adminClient, jobId)
-  if (!claimed) {
-    return { processed: false, reason: 'already_claimed' }
-  }
-
-  await processTranscript(adminClient, job.id, job.user_id, parsePayload(job))
-  return { processed: true }
-}
-
-export async function retryStaleProcessingJobs(staleMinutes = 15) {
-  const adminClient = createAdminClient()
-  const staleBefore = new Date(Date.now() - staleMinutes * 60_000).toISOString()
-
-  const { data: staleJobs } = await (adminClient
-    .from('processing_jobs') as ReturnType<typeof adminClient.from>)
-    .select('id')
-    .eq('status', 'processing')
-    .lt('updated_at', staleBefore)
-    .limit(25) as unknown as { data: Array<{ id: string }> | null }
-
-  if (!staleJobs || staleJobs.length === 0) {
-    return 0
-  }
-
-  const staleIds = staleJobs.map((j) => j.id)
-  await (adminClient.from('processing_jobs') as ReturnType<typeof adminClient.from>)
-    .update({
-      status: 'pending',
-      current_step: null,
-      progress: 0,
-      error: 'Retrying after stale processing timeout',
-    } as never)
-    .in('id', staleIds)
-
-  return staleIds.length
-}
-
 export async function processPendingJobs(limit = 3) {
   const adminClient = createAdminClient()
   const { data: pendingJobs } = await (adminClient
     .from('processing_jobs') as ReturnType<typeof adminClient.from>)
-    .select('id')
+    .select('id, user_id, source, source_id, metadata')
     .eq('status', 'pending')
     .order('created_at', { ascending: true })
-    .limit(limit) as unknown as { data: Array<{ id: string }> | null }
+    .limit(limit) as unknown as { data: Array<{ id: string; user_id: string; source: string; source_id: string | null; metadata: Record<string, unknown> | null }> | null }
 
   if (!pendingJobs || pendingJobs.length === 0) {
     return 0
@@ -568,8 +714,17 @@ export async function processPendingJobs(limit = 3) {
 
   let processedCount = 0
   for (const job of pendingJobs) {
-    const result = await processQueuedJob(job.id)
-    if (result.processed) {
+    const result = await processTranscriptToMemo({
+      source: job.source as 'fireflies' | 'granola' | 'manual',
+      transcriptId: job.source_id || undefined,
+      transcriptContent: job.metadata?.transcript_content as string | undefined,
+      userId: job.user_id,
+      jobId: job.id,
+      metadata: {
+        title: job.metadata?.title as string | undefined,
+      },
+    })
+    if (result.success) {
       processedCount += 1
     }
   }
