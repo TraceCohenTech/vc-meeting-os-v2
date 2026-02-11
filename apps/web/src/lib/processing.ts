@@ -1,9 +1,9 @@
 import { createAdminClient } from '@/lib/supabase/server'
 import { createMemoInDrive } from '@/lib/google/drive'
+import { sendEmail, memoProcessedEmail } from '@/lib/email'
+import { trackServerEvent } from '@/lib/analytics-server'
 
-// Use direct fetch to Groq API to avoid @ai-sdk header issues
-const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions'
-const GROQ_MODEL = 'llama-3.3-70b-versatile'
+// Use Claude API for all AI processing
 
 interface ProcessInput {
   source: 'fireflies' | 'granola' | 'manual'
@@ -22,50 +22,70 @@ interface ProcessResult {
   success: boolean
   memoId?: string
   companyName?: string
+  contactsCreated?: number
   error?: string
 }
 
+interface ExtractedContact {
+  name: string
+  email?: string
+  title?: string
+  company?: string
+  phone?: string
+  linkedin_url?: string
+  relationship_type?: 'founder' | 'investor' | 'advisor' | 'executive' | 'operator' | 'other'
+  notes?: string
+  // Per-meeting context (stored in contact_memos)
+  meeting_context?: {
+    their_interests?: string[]      // What they're interested in
+    their_concerns?: string[]       // Concerns or objections raised
+    their_asks?: string[]           // What they asked for
+    key_quotes?: string[]           // Notable things they said
+    follow_up_items?: string[]      // Suggested follow-ups
+    discussion_topics?: string[]    // Main topics discussed with them
+    sentiment?: 'very_positive' | 'positive' | 'neutral' | 'skeptical' | 'negative'
+    engagement_level?: 'high' | 'medium' | 'low'
+  }
+}
+
 /**
- * Call Groq API directly to avoid SDK header issues
+ * Call Claude API for AI processing
  */
-async function callGroq(prompt: string, systemPrompt?: string): Promise<string> {
-  const apiKey = (process.env.GROQ_API_KEY || '').trim()
+async function callClaude(prompt: string, systemPrompt?: string): Promise<string> {
+  const apiKey = (process.env.ANTHROPIC_API_KEY || '').trim()
 
   if (!apiKey) {
-    throw new Error('GROQ_API_KEY not configured')
+    throw new Error('ANTHROPIC_API_KEY not configured')
   }
 
-  const messages = []
-  if (systemPrompt) {
-    messages.push({ role: 'system', content: systemPrompt })
-  }
-  messages.push({ role: 'user', content: prompt })
+  // Combine system prompt with user prompt for Claude
+  const fullPrompt = systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt
 
-  console.log('[Groq] Calling API...')
+  console.log('[Claude] Calling API...')
 
-  const response = await fetch(GROQ_API_URL, {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
-      model: GROQ_MODEL,
-      messages,
-      temperature: 0.7,
+      model: 'claude-3-haiku-20240307',
       max_tokens: 4096,
+      messages: [{ role: 'user', content: fullPrompt }],
     }),
   })
 
   if (!response.ok) {
-    const errorText = await response.text()
-    console.error('[Groq API Error]', response.status, errorText)
-    throw new Error(`Groq API error: ${response.status} - ${errorText.slice(0, 200)}`)
+    const errorData = await response.json()
+    console.error('[Claude API Error]', response.status, errorData)
+    throw new Error(`Claude API error: ${response.status} - ${errorData.error?.message || 'Unknown'}`)
   }
 
   const data = await response.json()
-  const content = data.choices?.[0]?.message?.content || ''
-  console.log('[Groq] Response received, length:', content.length)
+  const content = data.content?.[0]?.text || ''
+  console.log('[Claude] Response received, length:', content.length)
   return content
 }
 
@@ -164,7 +184,7 @@ Transcript excerpt:
 ${transcript.slice(0, 3000)}`
 
   try {
-    const result = await callGroq(prompt)
+    const result = await callClaude(prompt)
     const category = result.trim().toLowerCase().replace(/['"]/g, '').replace(/\s+/g, '-')
 
     const validTypes = [
@@ -228,7 +248,7 @@ Transcript:
 ${transcript.slice(0, 3000)}`
 
   try {
-    const result = await callGroq(prompt)
+    const result = await callClaude(prompt)
 
     const jsonMatch = result.match(/\{[\s\S]*\}/)
     if (!jsonMatch) return null
@@ -529,14 +549,248 @@ If information isn't available for a section, write "Not discussed in meeting."
 Transcript:
 ${transcript.slice(0, 6000)}`
 
-  return await callGroq(prompt, systemPrompt)
+  return await callClaude(prompt, systemPrompt)
 }
 
 /**
  * Generate a brief summary
  */
 async function generateSummary(transcript: string): Promise<string> {
-  return await callGroq(`Summarize this meeting in 2-3 sentences. Be specific about what was discussed and any key outcomes:\n\n${transcript.slice(0, 2000)}`)
+  return await callClaude(`Summarize this meeting in 2-3 sentences. Be specific about what was discussed and any key outcomes:\n\n${transcript.slice(0, 2000)}`)
+}
+
+/**
+ * Extract participant/contact information from transcript
+ */
+async function extractParticipants(transcript: string, speakerNames: string[]): Promise<ExtractedContact[]> {
+  const prompt = `You are analyzing a meeting transcript to build a CRM. Extract ONLY HUMAN PEOPLE mentioned.
+
+SPEAKER NAMES FROM MEETING: ${speakerNames.join(', ')}
+
+CRITICAL RULES:
+1. Extract ONLY individual human beings with names
+2. DO NOT extract:
+   - Company names (e.g., "Sequoia", "Google", "TechStartup Inc")
+   - VC fund names (e.g., "a16z", "First Round")
+   - Product names or services
+   - Location names
+3. DO extract:
+   - All speakers/participants listed above
+   - People mentioned by first name only (e.g., "Shane", "Trent")
+   - Co-founders, team members, advisors mentioned BY NAME
+
+ONLY exclude the VC/investor who is hosting the meeting.
+
+For each person, extract what you can find:
+
+BASIC INFO:
+- name: Their name (first name only is OK if that's all mentioned)
+- email: Email if mentioned
+- title: Job title/role if mentioned
+- company: Their company if mentioned
+- phone: Phone number if mentioned
+- linkedin_url: LinkedIn URL if mentioned
+- relationship_type: One of: founder, investor, advisor, executive, operator, other
+- notes: Brief context about who they are
+
+MEETING CONTEXT (what happened in THIS meeting):
+- their_interests: Array of things they expressed interest in
+- their_concerns: Array of concerns, objections, or hesitations they raised
+- their_asks: Array of specific requests they made (intros, follow-ups, info needed)
+- key_quotes: Array of important/memorable things they said (direct quotes if possible)
+- follow_up_items: Array of suggested follow-ups based on the conversation
+- discussion_topics: Array of main topics discussed with them
+- sentiment: Their overall tone (very_positive, positive, neutral, skeptical, negative)
+- engagement_level: How engaged they were (high, medium, low)
+
+Return ONLY a valid JSON array. Include everyone, even with minimal info. Example:
+[{
+  "name": "Sarah Chen",
+  "title": "CEO & Co-founder",
+  "company": "TechStartup Inc",
+  "relationship_type": "founder",
+  "notes": "First meeting, pitching Series A",
+  "meeting_context": {
+    "their_interests": ["AI infrastructure", "enterprise sales motion"],
+    "their_concerns": ["runway concerns if deal takes too long"],
+    "their_asks": ["intro to portfolio company"],
+    "key_quotes": ["We're seeing 40% MoM growth"],
+    "follow_up_items": ["Send portfolio company intro"],
+    "discussion_topics": ["product roadmap", "go-to-market strategy"],
+    "sentiment": "positive",
+    "engagement_level": "high"
+  }
+},
+{
+  "name": "Trent",
+  "title": "CTO",
+  "company": "TechStartup Inc",
+  "relationship_type": "founder",
+  "notes": "Co-founder, technical lead"
+}]
+
+TRANSCRIPT:
+${transcript.slice(0, 10000)}`
+
+  try {
+    const result = await callClaude(prompt)
+    const jsonMatch = result.match(/\[[\s\S]*\]/)
+    if (!jsonMatch) return []
+
+    const parsed = JSON.parse(jsonMatch[0])
+    return parsed.filter((c: ExtractedContact) => c.name && c.name.trim().length > 0)
+  } catch (error) {
+    console.error('[Contact Extraction Error]', error)
+    return []
+  }
+}
+
+/**
+ * Create or update contacts in the database with rich meeting context
+ */
+async function createOrUpdateContacts(
+  adminClient: ReturnType<typeof createAdminClient>,
+  userId: string,
+  contacts: ExtractedContact[],
+  memoId: string,
+  companyId: string | null,
+  meetingDate: string | null
+): Promise<number> {
+  let createdCount = 0
+
+  for (const contact of contacts) {
+    try {
+      // Check if contact already exists by email, linkedin, or name
+      let existingContact = null
+
+      // Try email first (most reliable)
+      if (contact.email) {
+        const { data } = await (adminClient
+          .from('contacts') as ReturnType<typeof adminClient.from>)
+          .select('id, notes, relationship_type')
+          .eq('user_id', userId)
+          .eq('email', contact.email)
+          .single() as { data: { id: string; notes: string | null; relationship_type: string | null } | null }
+        existingContact = data
+      }
+
+      // Try LinkedIn URL
+      if (!existingContact && contact.linkedin_url) {
+        const { data } = await (adminClient
+          .from('contacts') as ReturnType<typeof adminClient.from>)
+          .select('id, notes, relationship_type')
+          .eq('user_id', userId)
+          .eq('linkedin_url', contact.linkedin_url)
+          .single() as { data: { id: string; notes: string | null; relationship_type: string | null } | null }
+        existingContact = data
+      }
+
+      // Fall back to fuzzy name matching
+      if (!existingContact) {
+        const { data } = await (adminClient
+          .from('contacts') as ReturnType<typeof adminClient.from>)
+          .select('id, notes, relationship_type')
+          .eq('user_id', userId)
+          .ilike('name', contact.name)
+          .single() as { data: { id: string; notes: string | null; relationship_type: string | null } | null }
+        existingContact = data
+      }
+
+      let contactId: string
+
+      if (existingContact) {
+        // Update existing contact with new info
+        const updateData: Record<string, unknown> = {
+          updated_at: new Date().toISOString(),
+        }
+
+        // Append new notes with date context
+        if (contact.notes) {
+          const existingNotes = existingContact.notes || ''
+          const datestamp = meetingDate ? new Date(meetingDate).toLocaleDateString() : new Date().toLocaleDateString()
+          updateData.notes = existingNotes
+            ? `${existingNotes}\n\n[${datestamp}] ${contact.notes}`
+            : `[${datestamp}] ${contact.notes}`
+        }
+
+        // Update fields if we have new info and they're not already set
+        if (contact.email) updateData.email = contact.email
+        if (contact.title) updateData.title = contact.title
+        if (contact.phone) updateData.phone = contact.phone
+        if (contact.linkedin_url) updateData.linkedin_url = contact.linkedin_url
+        if (contact.relationship_type && !existingContact.relationship_type) {
+          updateData.relationship_type = contact.relationship_type
+        }
+        if (companyId) updateData.company_id = companyId
+
+        await (adminClient.from('contacts') as ReturnType<typeof adminClient.from>)
+          .update(updateData as never)
+          .eq('id', existingContact.id)
+
+        contactId = existingContact.id
+        console.log(`[Contacts] Updated existing contact: ${contact.name}`)
+      } else {
+        // Create new contact
+        const insertData: Record<string, unknown> = {
+          user_id: userId,
+          name: contact.name,
+        }
+
+        if (contact.email) insertData.email = contact.email
+        if (contact.title) insertData.title = contact.title
+        if (contact.phone) insertData.phone = contact.phone
+        if (contact.linkedin_url) insertData.linkedin_url = contact.linkedin_url
+        if (contact.relationship_type) insertData.relationship_type = contact.relationship_type
+        if (companyId) insertData.company_id = companyId
+        if (contact.notes) {
+          const datestamp = meetingDate ? new Date(meetingDate).toLocaleDateString() : new Date().toLocaleDateString()
+          insertData.notes = `[${datestamp}] ${contact.notes}`
+        }
+
+        const { data: newContact, error } = await (adminClient
+          .from('contacts') as ReturnType<typeof adminClient.from>)
+          .insert(insertData as never)
+          .select('id')
+          .single() as { data: { id: string } | null; error: unknown }
+
+        if (error || !newContact) {
+          console.error(`[Contacts] Failed to create contact ${contact.name}:`, error)
+          continue
+        }
+
+        contactId = newContact.id
+        createdCount++
+        console.log(`[Contacts] Created new contact: ${contact.name}`)
+      }
+
+      // Link contact to memo WITH rich meeting context
+      const meetingContext = contact.meeting_context || {}
+      await (adminClient.from('contact_memos') as ReturnType<typeof adminClient.from>)
+        .upsert({
+          contact_id: contactId,
+          memo_id: memoId,
+          context: {
+            their_interests: meetingContext.their_interests || [],
+            their_concerns: meetingContext.their_concerns || [],
+            their_asks: meetingContext.their_asks || [],
+            key_quotes: meetingContext.key_quotes || [],
+            follow_up_items: meetingContext.follow_up_items || [],
+            discussion_topics: meetingContext.discussion_topics || [],
+            sentiment: meetingContext.sentiment || null,
+            engagement_level: meetingContext.engagement_level || null,
+            meeting_date: meetingDate,
+          },
+          created_at: new Date().toISOString(),
+        } as never, { onConflict: 'contact_id,memo_id' })
+
+      console.log(`[Contacts] Linked ${contact.name} to memo with ${Object.keys(meetingContext).length} context fields`)
+
+    } catch (err) {
+      console.error(`[Contacts] Error processing contact ${contact.name}:`, err)
+    }
+  }
+
+  return createdCount
 }
 
 /**
@@ -553,7 +807,7 @@ Memo:
 ${memoContent}`
 
   try {
-    const result = await callGroq(prompt)
+    const result = await callClaude(prompt)
     const jsonMatch = result.match(/\[[\s\S]*\]/)
     if (!jsonMatch) return []
     return JSON.parse(jsonMatch[0])
@@ -652,6 +906,7 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
     let transcript = transcriptContent || ''
     let meetingTitle = metadata?.title || 'Meeting Memo'
     let meetingDate = metadata?.date || null
+    let participants: string[] = metadata?.participants || []
 
     // Step 1: Fetch transcript if needed
     if (source === 'fireflies' && transcriptId && !transcript) {
@@ -677,6 +932,7 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
       const ffData = await fetchFirefliesTranscript(integration.credentials.api_key, transcriptId)
       transcript = ffData.transcript
       meetingTitle = ffData.title || meetingTitle
+      participants = ffData.participants || []
       // Convert Fireflies timestamp to ISO date string (YYYY-MM-DD)
       if (ffData.date) {
         try {
@@ -828,6 +1084,28 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
       }
     }
 
+    // Step 8.5: Extract and create contacts from participants
+    let contactsCreated = 0
+    try {
+      console.log(`[Processing] Extracting contacts from transcript...`)
+      const extractedContacts = await extractParticipants(transcript, participants)
+
+      if (extractedContacts.length > 0) {
+        console.log(`[Processing] Found ${extractedContacts.length} contacts to process`)
+        contactsCreated = await createOrUpdateContacts(
+          adminClient,
+          userId,
+          extractedContacts,
+          memo.id,
+          companyId,
+          meetingDate
+        )
+        console.log(`[Processing] Created ${contactsCreated} new contacts`)
+      }
+    } catch (contactError) {
+      console.error('[Processing] Contact extraction error (non-fatal):', contactError)
+    }
+
     // Step 9: File to Google Drive
     if (jobId) await updateJobProgress(adminClient, jobId, 'filing', 95)
 
@@ -896,12 +1174,27 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
       }
     }
 
-    console.log(`[Processing] Complete! Memo ID: ${memo.id}`)
+    console.log(`[Processing] Complete! Memo ID: ${memo.id}, Contacts created: ${contactsCreated}`)
+
+    // Send email notification (non-blocking)
+    sendEmailNotification(adminClient, userId, meetingTitle, companyName, memo.id).catch(err => {
+      console.error('[Processing] Email notification error (non-fatal):', err)
+    })
+
+    // Track analytics event (non-blocking)
+    trackServerEvent(userId, 'memo_synced', {
+      source,
+      company_name: companyName || null,
+      contacts_created: contactsCreated,
+    }).catch(err => {
+      console.error('[Processing] Analytics error (non-fatal):', err)
+    })
 
     return {
       success: true,
       memoId: memo.id,
       companyName: companyName || undefined,
+      contactsCreated,
     }
   } catch (error) {
     console.error('[Processing] Error:', error)
@@ -922,6 +1215,54 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
       success: false,
       error: error instanceof Error ? error.message : 'Processing failed',
     }
+  }
+}
+
+/**
+ * Send email notification for processed memo
+ */
+async function sendEmailNotification(
+  adminClient: ReturnType<typeof createAdminClient>,
+  userId: string,
+  memoTitle: string,
+  companyName: string | null,
+  memoId: string
+) {
+  try {
+    // Get user's profile to check notification preferences
+    const { data: profile } = await adminClient
+      .from('profiles')
+      .select('notification_email, email_digest_frequency')
+      .eq('id', userId)
+      .single() as { data: { notification_email: string | null; email_digest_frequency: string | null } | null }
+
+    if (!profile?.notification_email) {
+      console.log('[Processing] No notification email for user')
+      return
+    }
+
+    // Only send if user has enabled instant notifications (not never or digest)
+    // For now, we'll send for any frequency except 'never'
+    if (profile.email_digest_frequency === 'never') {
+      console.log('[Processing] User has email notifications disabled')
+      return
+    }
+
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://ai-vc-v2.vercel.app'
+    const memoUrl = `${appUrl}/memos/${memoId}`
+
+    const { subject, html, text } = memoProcessedEmail(memoTitle, companyName, memoUrl)
+
+    await sendEmail({
+      to: profile.notification_email,
+      subject,
+      html,
+      text,
+    })
+
+    console.log('[Processing] Email notification sent to:', profile.notification_email)
+  } catch (error) {
+    console.error('[Processing] Email notification error:', error)
   }
 }
 

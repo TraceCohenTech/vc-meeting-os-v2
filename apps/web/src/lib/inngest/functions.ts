@@ -1,13 +1,13 @@
 import { inngest } from './client'
 import { createAdminClient } from '@/lib/supabase/server'
 import { generateText } from 'ai'
-import { createGroq } from '@ai-sdk/groq'
+import { createAnthropic } from '@ai-sdk/anthropic'
 import { detectCompanyFromTranscript } from '@/lib/company-detection'
 import { detectMeetingType, getMemoTemplate, generateMemoFromTemplate } from '@/lib/templates/detection'
 import { createMemoInDrive } from '@/lib/google/drive'
 
-const groq = createGroq({
-  apiKey: process.env.GROQ_API_KEY,
+const anthropic = createAnthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
 })
 
 interface DbResult<T> {
@@ -233,13 +233,13 @@ export const processTranscript = inngest.createFunction(
 
       // Generate summary
       const summaryGeneration = await generateText({
-        model: groq('llama-3.3-70b-versatile'),
+        model: anthropic('claude-3-haiku-20240307'),
         prompt: `Summarize this meeting in 1-2 sentences:\n\n${transcriptData.transcript.slice(0, 2000)}`,
       })
 
       // Extract action items
       const tasksExtraction = await generateText({
-        model: groq('llama-3.3-70b-versatile'),
+        model: anthropic('claude-3-haiku-20240307'),
         prompt: `Extract action items from this meeting memo. Return a JSON array of tasks with:
 - title: Brief task description
 - priority: low, medium, or high

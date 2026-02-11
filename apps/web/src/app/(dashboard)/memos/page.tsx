@@ -1,8 +1,9 @@
 import { createClient } from '@/lib/supabase/server'
-import { FileText, Upload, Zap, Loader2, Clock, CheckCircle2, XCircle } from 'lucide-react'
+import { FileText, Loader2, Clock, CheckCircle2, XCircle } from 'lucide-react'
 import Link from 'next/link'
 import { MemoSearch } from './MemoSearch'
 import { MemoCard } from './MemoCard'
+import { SyncMemosButton } from './SyncMemosButton'
 
 interface SearchParams {
   q?: string
@@ -142,13 +143,7 @@ export default async function MemosPage({
             Your meeting notes and investment memos
           </p>
         </div>
-        <Link
-          href="/memos/new"
-          className="inline-flex items-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-500 transition-colors"
-        >
-          <FileText className="w-5 h-5" />
-          New Memo
-        </Link>
+        <SyncMemosButton />
       </div>
 
       {/* Search and Filters */}
@@ -303,24 +298,16 @@ export default async function MemosPage({
             <p className="text-slate-400 mb-8">
               {params.q
                 ? 'Try a different search term or clear your filters'
-                : 'Get started by importing a meeting transcript or creating your first memo'}
+                : 'Connect Fireflies in Settings, then click Sync Memos to import your meetings'}
             </p>
             {!params.q && (
-              <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+              <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
+                <SyncMemosButton />
                 <Link
-                  href="/memos/new"
-                  className="inline-flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-500 transition-colors"
+                  href="/settings"
+                  className="text-indigo-400 hover:text-indigo-300 text-sm font-medium"
                 >
-                  <Zap className="w-5 h-5" />
-                  Import Transcript
-                </Link>
-                <span className="text-slate-500">or</span>
-                <Link
-                  href="/memos/new?mode=process"
-                  className="inline-flex items-center gap-2 px-6 py-3 bg-slate-800 text-white rounded-lg font-medium hover:bg-slate-700 transition-colors"
-                >
-                  <Upload className="w-5 h-5" />
-                  Paste Transcript
+                  Connect Fireflies →
                 </Link>
               </div>
             )}

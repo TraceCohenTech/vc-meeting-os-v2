@@ -3,6 +3,8 @@ import { FileText, Building2, CheckSquare, AlertCircle, TrendingUp, Clock, Zap, 
 import Link from 'next/link'
 import { RetryButton } from './RetryButton'
 import { ClearAllButton } from './ClearAllButton'
+import { SetupChecklist } from './SetupChecklist'
+import { OnboardingModal } from '@/components/OnboardingModal'
 
 interface Stats {
   total_memos: number
@@ -74,6 +76,16 @@ export default async function DashboardPage() {
     .order('created_at', { ascending: false })
     .limit(10) as { data: ProcessingJob[] | null }
 
+  // Fetch integrations for setup checklist
+  const { data: integrations } = await supabase
+    .from('integrations')
+    .select('provider, status')
+    .eq('user_id', user!.id) as { data: Array<{ provider: string; status: string }> | null }
+
+  const hasFireflies = integrations?.some(i => i.provider === 'fireflies' && i.status === 'active') || false
+  const hasGoogleDrive = integrations?.some(i => i.provider === 'google' && i.status === 'active') || false
+  const hasMemos = (stats?.total_memos || 0) > 0
+
   // Filter to show recent jobs (last 24 hours for completed/failed, all pending/processing)
   const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
   const incomingJobs = (processingJobs || []).filter(job => {
@@ -116,12 +128,22 @@ export default async function DashboardPage() {
 
   return (
     <div className="p-8">
+      {/* Onboarding Modal for first-time users */}
+      <OnboardingModal hasFireflies={hasFireflies} hasGoogleDrive={hasGoogleDrive} />
+
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-white">Dashboard</h1>
         <p className="text-slate-400 mt-1">
           Welcome back! Here&apos;s what&apos;s happening with your deals.
         </p>
       </div>
+
+      {/* Setup Checklist - shows until complete */}
+      <SetupChecklist
+        hasFireflies={hasFireflies}
+        hasGoogleDrive={hasGoogleDrive}
+        hasMemos={hasMemos}
+      />
 
       {/* Active Processing Banner - Only show when actively processing */}
       {hasActiveJobs && (
@@ -260,10 +282,10 @@ export default async function DashboardPage() {
             <div className="text-center py-8">
               <p className="text-slate-500 mb-3">No memos yet</p>
               <Link
-                href="/memos/new"
+                href="/settings"
                 className="text-indigo-400 hover:text-indigo-300 text-sm"
               >
-                Create your first memo
+                Connect Fireflies to get started →
               </Link>
             </div>
           )}

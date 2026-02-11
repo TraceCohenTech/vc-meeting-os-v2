@@ -2,10 +2,7 @@ import { createClient, createAdminClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import { createMemoInDrive } from '@/lib/google/drive'
 
-// Use direct fetch to Groq API
-const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions'
-const GROQ_MODEL = 'llama-3.3-70b-versatile'
-
+// Use Claude API for memo generation
 interface FirefliesTranscript {
   id: string
   title: string
@@ -16,41 +13,42 @@ interface FirefliesTranscript {
   }>
 }
 
-async function callGroq(prompt: string, systemPrompt?: string): Promise<string> {
-  const apiKey = (process.env.GROQ_API_KEY || '').trim()
+async function callClaude(prompt: string, systemPrompt?: string): Promise<string> {
+  const apiKey = (process.env.ANTHROPIC_API_KEY || '').trim()
 
   if (!apiKey) {
-    throw new Error('GROQ_API_KEY not configured')
+    throw new Error('ANTHROPIC_API_KEY not configured')
   }
 
-  const messages = []
+  const messages: Array<{ role: string; content: string }> = []
   if (systemPrompt) {
-    messages.push({ role: 'system', content: systemPrompt })
+    messages.push({ role: 'user', content: systemPrompt + '\n\n' + prompt })
+  } else {
+    messages.push({ role: 'user', content: prompt })
   }
-  messages.push({ role: 'user', content: prompt })
 
-  const response = await fetch(GROQ_API_URL, {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
-      model: GROQ_MODEL,
-      messages,
-      temperature: 0.7,
+      model: 'claude-3-haiku-20240307',
       max_tokens: 4096,
+      messages,
     }),
   })
 
   if (!response.ok) {
-    const errorText = await response.text()
-    console.error('[Groq API Error]', response.status, errorText)
-    throw new Error(`Groq API error: ${response.status}`)
+    const errorData = await response.json()
+    console.error('[Claude API Error]', response.status, errorData)
+    throw new Error(`Claude API error: ${response.status} - ${errorData.error?.message || 'Unknown'}`)
   }
 
   const data = await response.json()
-  return data.choices?.[0]?.message?.content || ''
+  return data.content?.[0]?.text || ''
 }
 
 async function fetchFirefliesTranscript(apiKey: string, transcriptId: string): Promise<FirefliesTranscript | null> {
@@ -101,7 +99,7 @@ function formatTranscript(sentences: Array<{ speaker_name: string; text: string 
 
 async function detectMeetingType(transcript: string): Promise<string> {
   try {
-    const result = await callGroq(`Classify this meeting transcript into one of these categories:
+    const result = await callClaude(`Classify this meeting transcript into one of these categories:
 - founder-pitch: A startup pitch meeting with founders
 - customer-call: Customer discovery or sales call
 - partner-meeting: Partnership or BD discussion
@@ -131,7 +129,7 @@ async function detectCompany(
       ? `Known companies: ${existingCompanies.map(c => c.name).join(', ')}`
       : ''
 
-    const result = await callGroq(`Extract company information from this meeting transcript.
+    const result = await callClaude(`Extract company information from this meeting transcript.
 
 ${companyList}
 
@@ -194,7 +192,7 @@ async function generateMemoContent(transcript: string, meetingType: string): Pro
 ## Next Steps`,
   }
 
-  return await callGroq(
+  return await callClaude(
     `${templates[meetingType] || templates['internal']}
 
 Be concise. Extract specific numbers and facts.
@@ -207,7 +205,7 @@ ${transcript.slice(0, 6000)}`,
 }
 
 async function generateSummary(transcript: string): Promise<string> {
-  return await callGroq(`Summarize this meeting in 2-3 sentences:\n\n${transcript.slice(0, 2000)}`)
+  return await callClaude(`Summarize this meeting in 2-3 sentences:\n\n${transcript.slice(0, 2000)}`)
 }
 
 export async function POST(request: Request) {

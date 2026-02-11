@@ -1,8 +1,8 @@
 import { generateText } from 'ai'
-import { createGroq } from '@ai-sdk/groq'
+import { createAnthropic } from '@ai-sdk/anthropic'
 
-const groq = createGroq({
-  apiKey: process.env.GROQ_API_KEY,
+const anthropic = createAnthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
 })
 
 export interface CompanyDetection {
@@ -154,7 +154,7 @@ export async function detectCompanyFromTranscript(
   try {
     // Use AI to extract company information
     const extraction = await generateText({
-      model: groq('llama-3.3-70b-versatile'),
+      model: anthropic('claude-3-haiku-20240307'),
       prompt: `Analyze this meeting transcript and extract information about the PRIMARY company being discussed (if this is a pitch meeting, the company pitching; if a customer call, the customer's company; etc.).
 
 If multiple companies are discussed, focus on the main subject of the meeting.

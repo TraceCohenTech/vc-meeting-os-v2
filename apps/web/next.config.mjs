@@ -1,3 +1,5 @@
+import { withSentryConfig } from '@sentry/nextjs';
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   async redirects() {
@@ -18,4 +20,12 @@ const nextConfig = {
   },
 };
 
-export default nextConfig;
+// Wrap with Sentry only if DSN is configured
+const sentryConfig = {
+  silent: true, // Suppresses source map upload logs
+  hideSourceMaps: true,
+};
+
+export default process.env.NEXT_PUBLIC_SENTRY_DSN
+  ? withSentryConfig(nextConfig, sentryConfig)
+  : nextConfig;

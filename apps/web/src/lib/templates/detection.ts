@@ -1,5 +1,5 @@
 import { generateText } from 'ai'
-import { createGroq } from '@ai-sdk/groq'
+import { createAnthropic } from '@ai-sdk/anthropic'
 import {
   MEMO_TEMPLATES,
   getTemplateById,
@@ -7,8 +7,8 @@ import {
   type MeetingType,
 } from './index'
 
-const groq = createGroq({
-  apiKey: process.env.GROQ_API_KEY,
+const anthropic = createAnthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
 })
 
 /**
@@ -58,7 +58,7 @@ async function classifyWithAI(transcript: string): Promise<MeetingType> {
 
   try {
     const response = await generateText({
-      model: groq('llama-3.3-70b-versatile'),
+      model: anthropic('claude-3-haiku-20240307'),
       prompt: `Classify this meeting transcript into one of the following categories:
 
 ${templateDescriptions}
@@ -111,7 +111,7 @@ export async function generateMemoFromTemplate(
   for (const section of template.sections) {
     try {
       const response = await generateText({
-        model: groq('llama-3.3-70b-versatile'),
+        model: anthropic('claude-3-haiku-20240307'),
         system: template.systemPrompt,
         prompt: `From the following meeting transcript, ${section.prompt}
 
@@ -144,7 +144,7 @@ ${transcript.slice(0, 5000)}`,
  */
 export async function generateQuickSummary(transcript: string): Promise<string> {
   const response = await generateText({
-    model: groq('llama-3.3-70b-versatile'),
+    model: anthropic('claude-3-haiku-20240307'),
     prompt: `Provide a brief 2-3 sentence summary of this meeting:
 
 ${transcript.slice(0, 3000)}`,
@@ -169,7 +169,7 @@ export async function regenerateSection(
   }
 
   const response = await generateText({
-    model: groq('llama-3.3-70b-versatile'),
+    model: anthropic('claude-3-haiku-20240307'),
     system: template.systemPrompt,
     prompt: `From the following meeting transcript, ${section.prompt}
 

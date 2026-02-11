@@ -13,6 +13,7 @@ import {
   LogOut,
   ChevronLeft,
   ChevronRight,
+  Users,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
@@ -22,6 +23,7 @@ const navItems = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/memos', label: 'Memos', icon: FileText },
   { href: '/companies', label: 'Companies', icon: Building2 },
+  { href: '/people', label: 'People', icon: Users },
   { href: '/chat', label: 'AI Chat', icon: MessageSquare },
   { href: '/funds', label: 'Funds', icon: BarChart3 },
   { href: '/settings', label: 'Settings', icon: Settings },

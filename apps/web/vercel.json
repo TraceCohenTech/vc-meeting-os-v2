@@ -1,19 +1,9 @@
 {
+  "framework": "nextjs",
   "crons": [
     {
       "path": "/api/cron/process-jobs",
       "schedule": "0 6 * * *"
     }
-  ],
-  "functions": {
-    "src/app/api/webhooks/fireflies/route.ts": {
-      "maxDuration": 60
-    },
-    "src/app/api/process/sync/route.ts": {
-      "maxDuration": 60
-    },
-    "src/app/api/cron/process-jobs/route.ts": {
-      "maxDuration": 60
-    }
-  }
+  ]
 }

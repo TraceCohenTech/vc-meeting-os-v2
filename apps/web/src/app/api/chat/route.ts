@@ -1,10 +1,10 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import { generateText } from 'ai'
-import { createGroq } from '@ai-sdk/groq'
+import { createAnthropic } from '@ai-sdk/anthropic'
 
-const groq = createGroq({
-  apiKey: process.env.GROQ_API_KEY,
+const anthropic = createAnthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
 })
 
 interface MemoResult {
@@ -85,9 +85,9 @@ Instructions:
 - If you don't have enough context to answer, say so
 - Help with tasks like summarizing meetings, finding patterns, and tracking follow-ups`
 
-    // Generate response using Groq
+    // Generate response using Claude
     const { text } = await generateText({
-      model: groq('llama-3.3-70b-versatile'),
+      model: anthropic('claude-3-haiku-20240307'),
       system: systemContext,
       prompt: message,
     })

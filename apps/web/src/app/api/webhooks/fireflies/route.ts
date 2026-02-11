@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/server'
 import { processTranscriptToMemo } from '@/lib/processing'
+import { checkRateLimit, rateLimitResponse } from '@/lib/rate-limit'
 
 interface FirefliesPayload {
   meetingId: string
@@ -39,6 +40,14 @@ function parsePayload(body: unknown): FirefliesPayload | null {
 export async function POST(request: NextRequest) {
   const startTime = Date.now()
   console.log('[Fireflies Webhook] Received request')
+
+  // Rate limiting - use IP address as identifier
+  const ip = request.headers.get('x-forwarded-for')?.split(',')[0] || 'unknown'
+  const rateLimitResult = await checkRateLimit(`webhook:fireflies:${ip}`, 'webhook')
+  if (!rateLimitResult.success) {
+    console.log('[Fireflies Webhook] Rate limited:', ip)
+    return rateLimitResponse(rateLimitResult)
+  }
 
   try {
     const rawBody = await request.text()
