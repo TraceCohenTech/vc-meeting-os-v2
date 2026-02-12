@@ -14,6 +14,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Users,
+  Bell,
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
@@ -24,6 +25,7 @@ const navItems = [
   { href: '/memos', label: 'Memos', icon: FileText },
   { href: '/companies', label: 'Companies', icon: Building2 },
   { href: '/people', label: 'People', icon: Users },
+  { href: '/reminders', label: 'Reminders', icon: Bell },
   { href: '/chat', label: 'AI Chat', icon: MessageSquare },
   { href: '/funds', label: 'Funds', icon: BarChart3 },
   { href: '/settings', label: 'Settings', icon: Settings },

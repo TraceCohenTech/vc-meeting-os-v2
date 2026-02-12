@@ -23,6 +23,7 @@ interface ProcessResult {
   memoId?: string
   companyName?: string
   contactsCreated?: number
+  remindersCreated?: number
   error?: string
 }
 
@@ -46,6 +47,16 @@ interface ExtractedContact {
     sentiment?: 'very_positive' | 'positive' | 'neutral' | 'skeptical' | 'negative'
     engagement_level?: 'high' | 'medium' | 'low'
   }
+}
+
+interface ExtractedCommitment {
+  type: 'commitment' | 'follow_up' | 'intro_request' | 'deadline'
+  title: string
+  context: string
+  source_text: string
+  related_person?: string
+  due_date?: string // ISO date if mentioned
+  priority: 'low' | 'medium' | 'high'
 }
 
 /**
@@ -794,6 +805,159 @@ async function createOrUpdateContacts(
 }
 
 /**
+ * Extract commitments and follow-ups from transcript for smart reminders
+ */
+async function extractCommitments(transcript: string, memoContent: string): Promise<ExtractedCommitment[]> {
+  const prompt = `You are analyzing a meeting transcript to identify commitments, promises, and follow-up items that need to be tracked.
+
+Extract ALL of the following:
+1. COMMITMENTS: Things someone promised to do (e.g., "I'll send you the deck", "We'll schedule a follow-up")
+2. FOLLOW-UPS: Action items that need follow-up (e.g., "Let's reconnect in two weeks", "Circle back after the board meeting")
+3. INTRO REQUESTS: Requests for introductions (e.g., "Can you introduce me to...", "I'd love to meet...")
+4. DEADLINES: Specific deadlines mentioned (e.g., "Need an answer by Friday", "Closing the round by end of month")
+
+For each item, extract:
+- type: "commitment", "follow_up", "intro_request", or "deadline"
+- title: Brief description (max 80 chars)
+- context: Why this matters or background context
+- source_text: The actual quote or paraphrase from the transcript
+- related_person: Name of person who made/requested this (if identifiable)
+- due_date: ISO date (YYYY-MM-DD) if a specific date/time was mentioned, null otherwise
+- priority: "high" if urgent/time-sensitive, "medium" for important follow-ups, "low" for nice-to-haves
+
+IMPORTANT:
+- Focus on actionable items, not general discussion points
+- Extract commitments from BOTH the investor (you) and the other party
+- Be specific about who needs to do what
+
+Return ONLY a valid JSON array. If no commitments found, return [].
+
+Example:
+[{
+  "type": "commitment",
+  "title": "Send portfolio company intro",
+  "context": "Founder asked for intro to portfolio company working on similar space",
+  "source_text": "I'll connect you with Sarah from TechCo this week",
+  "related_person": "Sarah Chen",
+  "due_date": null,
+  "priority": "medium"
+},
+{
+  "type": "follow_up",
+  "title": "Schedule follow-up call in 2 weeks",
+  "context": "Waiting on product launch metrics before next discussion",
+  "source_text": "Let's reconnect after your product launch",
+  "related_person": "John Smith",
+  "due_date": "2024-02-28",
+  "priority": "medium"
+}]
+
+TRANSCRIPT:
+${transcript.slice(0, 8000)}
+
+MEMO SUMMARY:
+${memoContent.slice(0, 2000)}`
+
+  try {
+    const result = await callClaude(prompt)
+    const jsonMatch = result.match(/\[[\s\S]*\]/)
+    if (!jsonMatch) return []
+
+    const parsed = JSON.parse(jsonMatch[0])
+    return parsed.filter((c: ExtractedCommitment) => c.title && c.type)
+  } catch (error) {
+    console.error('[Commitment Extraction Error]', error)
+    return []
+  }
+}
+
+/**
+ * Create reminders from extracted commitments
+ */
+async function createReminders(
+  adminClient: ReturnType<typeof createAdminClient>,
+  userId: string,
+  commitments: ExtractedCommitment[],
+  memoId: string,
+  companyId: string | null,
+  contactMap: Map<string, string> // name -> contact_id
+): Promise<number> {
+  let createdCount = 0
+
+  for (const commitment of commitments) {
+    try {
+      // Try to find associated contact
+      let contactId: string | null = null
+      if (commitment.related_person) {
+        // Check exact match first
+        contactId = contactMap.get(commitment.related_person) || null
+
+        // Try fuzzy match if no exact match
+        if (!contactId) {
+          const lowerName = commitment.related_person.toLowerCase()
+          for (const [name, id] of contactMap.entries()) {
+            if (name.toLowerCase().includes(lowerName) || lowerName.includes(name.toLowerCase())) {
+              contactId = id
+              break
+            }
+          }
+        }
+      }
+
+      // Calculate due date
+      let dueDate: string | null = null
+      if (commitment.due_date) {
+        dueDate = commitment.due_date
+      } else {
+        // Default due dates based on type
+        const now = new Date()
+        switch (commitment.type) {
+          case 'commitment':
+            now.setDate(now.getDate() + 7) // 1 week for commitments
+            break
+          case 'follow_up':
+            now.setDate(now.getDate() + 14) // 2 weeks for follow-ups
+            break
+          case 'intro_request':
+            now.setDate(now.getDate() + 7) // 1 week for intros
+            break
+          case 'deadline':
+            now.setDate(now.getDate() + 3) // 3 days for deadlines without date
+            break
+        }
+        dueDate = now.toISOString().split('T')[0]
+      }
+
+      const { error } = await (adminClient.from('reminders') as ReturnType<typeof adminClient.from>)
+        .insert({
+          user_id: userId,
+          contact_id: contactId,
+          company_id: companyId,
+          memo_id: memoId,
+          type: commitment.type,
+          title: commitment.title.slice(0, 255),
+          context: commitment.context || null,
+          source_text: commitment.source_text || null,
+          due_date: dueDate,
+          priority: commitment.priority || 'medium',
+          status: 'pending',
+        } as never)
+
+      if (error) {
+        console.error(`[Reminders] Failed to create reminder:`, error)
+      } else {
+        createdCount++
+        console.log(`[Reminders] Created: ${commitment.title}`)
+      }
+    } catch (err) {
+      console.error(`[Reminders] Error creating reminder:`, err)
+    }
+  }
+
+  return createdCount
+}
+
+/**
  * Extract action items as tasks
  */
 async function extractTasks(memoContent: string): Promise<Array<{ title: string; priority: string }>> {
@@ -1086,6 +1250,7 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
 
     // Step 8.5: Extract and create contacts from participants
     let contactsCreated = 0
+    const contactNameToIdMap = new Map<string, string>()
     try {
       console.log(`[Processing] Extracting contacts from transcript...`)
       const extractedContacts = await extractParticipants(transcript, participants)
@@ -1101,9 +1266,46 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
           meetingDate
         )
         console.log(`[Processing] Created ${contactsCreated} new contacts`)
+
+        // Build contact name -> ID map for reminder linking
+        for (const contact of extractedContacts) {
+          // Fetch the contact ID from the database
+          const { data: contactData } = await (adminClient
+            .from('contacts') as ReturnType<typeof adminClient.from>)
+            .select('id')
+            .eq('user_id', userId)
+            .ilike('name', contact.name)
+            .single() as { data: { id: string } | null }
+
+          if (contactData) {
+            contactNameToIdMap.set(contact.name, contactData.id)
+          }
+        }
       }
     } catch (contactError) {
       console.error('[Processing] Contact extraction error (non-fatal):', contactError)
+    }
+
+    // Step 8.6: Extract commitments and create reminders
+    let remindersCreated = 0
+    try {
+      console.log(`[Processing] Extracting commitments from transcript...`)
+      const commitments = await extractCommitments(transcript, memoContent)
+
+      if (commitments.length > 0) {
+        console.log(`[Processing] Found ${commitments.length} commitments to track`)
+        remindersCreated = await createReminders(
+          adminClient,
+          userId,
+          commitments,
+          memo.id,
+          companyId,
+          contactNameToIdMap
+        )
+        console.log(`[Processing] Created ${remindersCreated} reminders`)
+      }
+    } catch (reminderError) {
+      console.error('[Processing] Commitment extraction error (non-fatal):', reminderError)
     }
 
     // Step 9: File to Google Drive
@@ -1174,7 +1376,7 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
       }
     }
 
-    console.log(`[Processing] Complete! Memo ID: ${memo.id}, Contacts created: ${contactsCreated}`)
+    console.log(`[Processing] Complete! Memo ID: ${memo.id}, Contacts: ${contactsCreated}, Reminders: ${remindersCreated}`)
 
     // Send email notification (non-blocking)
     sendEmailNotification(adminClient, userId, meetingTitle, companyName, memo.id).catch(err => {
@@ -1186,6 +1388,7 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
       source,
       company_name: companyName || null,
       contacts_created: contactsCreated,
+      reminders_created: remindersCreated,
     }).catch(err => {
       console.error('[Processing] Analytics error (non-fatal):', err)
     })
@@ -1195,6 +1398,7 @@ export async function processTranscriptToMemo(input: ProcessInput): Promise<Proc
       memoId: memo.id,
       companyName: companyName || undefined,
       contactsCreated,
+      remindersCreated,
     }
   } catch (error) {
     console.error('[Processing] Error:', error)
