@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react'
 import funds from '@/data/funds.json'
-import { Search, BarChart3, MapPin, Calendar, DollarSign, Filter } from 'lucide-react'
+import { Search, BarChart3, MapPin, Calendar, DollarSign, Filter, PieChart, TrendingUp, Calculator } from 'lucide-react'
 
 interface FundRow {
   index: string | null
@@ -17,6 +17,13 @@ interface FundRow {
 }
 
 const allFunds = funds as FundRow[]
+
+const tabs = [
+  { id: 'tracker', label: 'Fundraising Tracker', icon: BarChart3 },
+  { id: 'portfolio', label: 'Portfolio Model', icon: PieChart, url: 'https://v0-vc-portfolio-model.vercel.app/' },
+  { id: 'benchmarking', label: 'Fund Benchmarking', icon: TrendingUp, url: 'https://v0-vc-fund-benchmarking.vercel.app/' },
+  { id: 'spv', label: 'SPV Calculator', icon: Calculator, url: 'https://v0-spv-construction-calculator.vercel.app/' },
+]
 
 function bucketYears(rows: FundRow[]) {
   const counts = new Map<number, number>()
@@ -49,6 +56,7 @@ function formatAmount(value: number | null) {
 }
 
 export default function FundsDashboardPage() {
+  const [activeTab, setActiveTab] = useState('tracker')
   const [query, setQuery] = useState('')
   const [year, setYear] = useState<string>('all')
   const [minAmount, setMinAmount] = useState('')
@@ -79,18 +87,47 @@ export default function FundsDashboardPage() {
 
   const maxYearCount = Math.max(1, ...yearBuckets.map((b) => b.count))
 
+  const currentTab = tabs.find(t => t.id === activeTab)
+
   return (
-    <div className="p-8 space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-white">Fundraising Tracker</h1>
-          <p className="text-slate-400">Explore VC funds under $200M, searchable and filterable.</p>
-        </div>
-        <div className="inline-flex items-center gap-2 text-sm text-slate-400">
-          <BarChart3 className="w-4 h-4 text-indigo-400" />
-          Updated from CSV dataset
+    <div className="flex flex-col h-full">
+      {/* Tabs */}
+      <div className="border-b border-slate-800 px-8 pt-6">
+        <div className="flex gap-1 overflow-x-auto">
+          {tabs.map((tab) => {
+            const Icon = tab.icon
+            const isActive = activeTab === tab.id
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium rounded-t-lg transition-colors whitespace-nowrap ${
+                  isActive
+                    ? 'bg-slate-900 text-white border-t border-l border-r border-slate-700'
+                    : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                }`}
+              >
+                <Icon className="w-4 h-4" />
+                {tab.label}
+              </button>
+            )
+          })}
         </div>
       </div>
+
+      {/* Content */}
+      {activeTab === 'tracker' ? (
+        <div className="p-8 space-y-6 overflow-auto flex-1">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <h1 className="text-2xl font-bold text-white">Fundraising Tracker</h1>
+              <p className="text-slate-400">Explore VC funds under $200M, searchable and filterable.</p>
+            </div>
+            <div className="inline-flex items-center gap-2 text-sm text-slate-400">
+              <BarChart3 className="w-4 h-4 text-indigo-400" />
+              Updated from CSV dataset
+            </div>
+          </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
@@ -243,6 +280,17 @@ export default function FundsDashboardPage() {
           )}
         </div>
       </div>
+        </div>
+      ) : (
+        <div className="flex-1 bg-slate-950">
+          <iframe
+            src={currentTab?.url}
+            className="w-full h-full border-0"
+            title={currentTab?.label}
+            allow="clipboard-write"
+          />
+        </div>
+      )}
     </div>
   )
 }

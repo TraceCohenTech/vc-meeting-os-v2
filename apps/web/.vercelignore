@@ -1,0 +1,54 @@
+# Dependencies are installed by Vercel
+node_modules
+
+# Development files
+*.md
+!README.md
+*.log
+*.local
+
+# Test files
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+**/*.spec.tsx
+__tests__
+coverage
+.nyc_output
+
+# IDE and editor configs
+.vscode
+.idea
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Build artifacts that aren't needed
+.turbo
+.cache
+*.tsbuildinfo
+
+# Documentation and misc
+docs
+examples
+CHANGELOG*
+CONTRIBUTING*
+
+# Local environment (shouldn't be uploaded anyway)
+.env.local
+.env.*.local
+
+# Migration files (already applied)
+migrations
+
+# Git
+.git
+.gitignore
+
+# Supabase local
+supabase/.branches
+supabase/.temp

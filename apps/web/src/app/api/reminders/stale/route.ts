@@ -200,7 +200,7 @@ export async function POST() {
           priority: daysSince > 60 ? 'high' : daysSince > 45 ? 'medium' : 'low',
           status: 'pending',
           due_date: new Date().toISOString().split('T')[0], // Due now
-        })
+        } as never)
 
       if (insertError) {
         console.error(`[Stale Reminders] Insert error for ${contact.name}:`, insertError)

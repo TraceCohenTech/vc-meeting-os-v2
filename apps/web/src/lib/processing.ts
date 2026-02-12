@@ -895,7 +895,9 @@ async function createReminders(
         // Try fuzzy match if no exact match
         if (!contactId) {
           const lowerName = commitment.related_person.toLowerCase()
-          for (const [name, id] of contactMap.entries()) {
+          const mapEntries = Array.from(contactMap.entries())
+          for (let i = 0; i < mapEntries.length; i++) {
+            const [name, id] = mapEntries[i]
             if (name.toLowerCase().includes(lowerName) || lowerName.includes(name.toLowerCase())) {
               contactId = id
               break

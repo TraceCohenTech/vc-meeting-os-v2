@@ -124,7 +124,7 @@ export async function PATCH(
 
     const { data: reminder, error } = await supabase
       .from('reminders')
-      .update(updateData)
+      .update(updateData as never)
       .eq('id', id)
       .select('id, status, snoozed_until, completed_at')
       .single()

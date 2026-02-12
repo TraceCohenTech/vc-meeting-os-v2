@@ -1,7 +1,6 @@
 'use client'
 
 import { useState } from 'react'
-import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import {
@@ -182,7 +181,7 @@ export function ReminderList({ reminders }: ReminderListProps) {
                     {reminder.source_text && (
                       <div className="mt-2 flex items-start gap-2 text-xs text-slate-500 bg-slate-800/50 rounded-lg p-2">
                         <MessageSquare className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
-                        <span className="italic line-clamp-2">"{reminder.source_text}"</span>
+                        <span className="italic line-clamp-2">&ldquo;{reminder.source_text}&rdquo;</span>
                       </div>
                     )}
                   </div>

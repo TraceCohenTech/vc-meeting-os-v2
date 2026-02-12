@@ -2,11 +2,11 @@ import { createClient } from '@/lib/supabase/server'
 import {
   Bell,
   AlertCircle,
-  Clock,
   CheckCircle2,
   XCircle,
-  Users,
+  Clock,
   Handshake,
+  Users,
   CalendarClock,
   UserPlus,
 } from 'lucide-react'
@@ -16,14 +16,6 @@ import { GenerateStaleButton } from './GenerateStaleButton'
 interface SearchParams {
   status?: string
   type?: string
-}
-
-const typeIcons: Record<string, typeof Bell> = {
-  commitment: Handshake,
-  stale_relationship: Users,
-  follow_up: CalendarClock,
-  deadline: Clock,
-  intro_request: UserPlus,
 }
 
 const typeLabels: Record<string, string> = {

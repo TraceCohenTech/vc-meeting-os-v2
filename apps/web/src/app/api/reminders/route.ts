@@ -144,7 +144,7 @@ export async function POST(request: Request) {
         company_id: company_id || null,
         memo_id: memo_id || null,
         status: 'pending',
-      })
+      } as never)
       .select('id')
       .single()
 
