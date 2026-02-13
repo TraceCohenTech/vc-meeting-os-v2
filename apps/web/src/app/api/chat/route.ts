@@ -28,7 +28,7 @@ interface Contact {
   title: string | null
   company_id: string | null
   companies: { name: string } | null
-  last_contacted: string | null
+  last_met_date: string | null
   notes: string | null
 }
 
@@ -79,9 +79,9 @@ export async function POST(request: Request) {
 
     const { data: contactsData } = await supabase
       .from('contacts')
-      .select('id, name, email, title, company_id, companies(name), last_contacted, notes')
+      .select('id, name, email, title, company_id, companies(name), last_met_date, notes')
       .eq('user_id', user.id)
-      .order('last_contacted', { ascending: false, nullsFirst: false })
+      .order('last_met_date', { ascending: false, nullsFirst: false })
       .limit(100)
 
     const { data: companiesData } = await supabase
@@ -127,10 +127,10 @@ Content: ${memo.content.slice(0, 1500)}${memo.content.length > 1500 ? '...' : ''
     const contactsContext = contacts.length > 0
       ? contacts.map(c => {
           const companyName = c.companies?.name || 'No company'
-          const lastContact = c.last_contacted
-            ? new Date(c.last_contacted).toLocaleDateString()
+          const lastMet = c.last_met_date
+            ? new Date(c.last_met_date).toLocaleDateString()
             : 'Never'
-          return `- ${c.name}${c.title ? ` (${c.title})` : ''} at ${companyName} | Last contact: ${lastContact}${c.email ? ` | Email: ${c.email}` : ''}${c.notes ? ` | Notes: ${c.notes.slice(0, 100)}` : ''}`
+          return `- ${c.name}${c.title ? ` (${c.title})` : ''} at ${companyName} | Last met: ${lastMet}${c.email ? ` | Email: ${c.email}` : ''}${c.notes ? ` | Notes: ${c.notes.slice(0, 100)}` : ''}`
         }).join('\n')
       : 'No contacts yet'
 
