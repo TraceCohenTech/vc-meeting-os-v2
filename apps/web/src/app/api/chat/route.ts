@@ -21,6 +21,39 @@ interface StatsResult {
   pending_tasks: number
 }
 
+interface Contact {
+  id: string
+  name: string
+  email: string | null
+  title: string | null
+  company_id: string | null
+  companies: { name: string } | null
+  last_contacted: string | null
+  notes: string | null
+}
+
+interface Company {
+  id: string
+  name: string
+  website: string | null
+  stage: string | null
+  sector: string | null
+  location: string | null
+  description: string | null
+  notes: string | null
+}
+
+interface Reminder {
+  id: string
+  type: string
+  title: string
+  context: string | null
+  due_date: string | null
+  status: string
+  contacts: { name: string } | null
+  companies: { name: string } | null
+}
+
 export async function POST(request: Request) {
   try {
     const { message, conversationId } = await request.json()
@@ -36,7 +69,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    // Search for relevant memos using FTS
+    // Fetch all user data in parallel for comprehensive context
     // @ts-expect-error - Supabase RPC types
     const { data: relevantMemos } = await supabase.rpc('search_memos', {
       search_query: message,
@@ -44,46 +77,105 @@ export async function POST(request: Request) {
       result_limit: 5,
     }) as { data: MemoResult[] | null }
 
-    // Build context from relevant memos
-    let context = ''
-    const sources: Array<{ id: string; title: string }> = []
+    const { data: contactsData } = await supabase
+      .from('contacts')
+      .select('id, name, email, title, company_id, companies(name), last_contacted, notes')
+      .eq('user_id', user.id)
+      .order('last_contacted', { ascending: false, nullsFirst: false })
+      .limit(100)
 
-    if (relevantMemos && relevantMemos.length > 0) {
-      context = relevantMemos
-        .map((memo) => {
-          sources.push({ id: memo.id, title: memo.title })
-          return `
-Meeting: ${memo.title}
-Date: ${memo.meeting_date ? new Date(memo.meeting_date).toLocaleDateString() : 'Unknown'}
-Content:
-${memo.content.slice(0, 2000)}${memo.content.length > 2000 ? '...' : ''}
----`
-        })
-        .join('\n\n')
-    }
+    const { data: companiesData } = await supabase
+      .from('companies')
+      .select('id, name, website, stage, sector, location, description, notes')
+      .eq('user_id', user.id)
+      .order('updated_at', { ascending: false })
+      .limit(100)
 
-    // Also fetch some general stats for context
+    const { data: remindersData } = await supabase
+      .from('reminders')
+      .select('id, type, title, context, due_date, status, contacts(name), companies(name)')
+      .eq('user_id', user.id)
+      .eq('status', 'pending')
+      .order('due_date', { ascending: true, nullsFirst: false })
+      .limit(50)
+
     // @ts-expect-error - Supabase RPC types
     const { data: stats } = await supabase.rpc('get_user_stats', {
       p_user_id: user.id,
     }) as { data: StatsResult | null }
 
-    const systemContext = `You are an AI assistant helping a venture capitalist manage their deal flow and meeting notes. You have access to their meeting memos and can answer questions about their meetings, companies, and action items.
+    const contacts = (contactsData || []) as Contact[]
+    const companies = (companiesData || []) as Company[]
+    const reminders = (remindersData || []) as Reminder[]
 
-Current portfolio stats:
+    // Build context from relevant memos
+    let memoContext = ''
+    const sources: Array<{ id: string; title: string }> = []
+
+    if (relevantMemos && relevantMemos.length > 0) {
+      memoContext = relevantMemos
+        .map((memo) => {
+          sources.push({ id: memo.id, title: memo.title })
+          return `Meeting: ${memo.title}
+Date: ${memo.meeting_date ? new Date(memo.meeting_date).toLocaleDateString() : 'Unknown'}
+Content: ${memo.content.slice(0, 1500)}${memo.content.length > 1500 ? '...' : ''}`
+        })
+        .join('\n\n')
+    }
+
+    // Build contacts context
+    const contactsContext = contacts.length > 0
+      ? contacts.map(c => {
+          const companyName = c.companies?.name || 'No company'
+          const lastContact = c.last_contacted
+            ? new Date(c.last_contacted).toLocaleDateString()
+            : 'Never'
+          return `- ${c.name}${c.title ? ` (${c.title})` : ''} at ${companyName} | Last contact: ${lastContact}${c.email ? ` | Email: ${c.email}` : ''}${c.notes ? ` | Notes: ${c.notes.slice(0, 100)}` : ''}`
+        }).join('\n')
+      : 'No contacts yet'
+
+    // Build companies context
+    const companiesContext = companies.length > 0
+      ? companies.map(c => {
+          return `- ${c.name}${c.stage ? ` (${c.stage})` : ''}${c.sector ? ` | Sector: ${c.sector}` : ''}${c.location ? ` | Location: ${c.location}` : ''}${c.description ? ` | ${c.description.slice(0, 150)}` : ''}`
+        }).join('\n')
+      : 'No companies tracked yet'
+
+    // Build reminders context
+    const remindersContext = reminders.length > 0
+      ? reminders.map(r => {
+          const dueDate = r.due_date ? new Date(r.due_date).toLocaleDateString() : 'No due date'
+          const relatedTo = r.contacts?.name || r.companies?.name || ''
+          return `- [${r.type}] ${r.title}${relatedTo ? ` (${relatedTo})` : ''} | Due: ${dueDate}`
+        }).join('\n')
+      : 'No pending reminders'
+
+    const systemContext = `You are an AI assistant helping a venture capitalist manage their deal flow, contacts, and meeting notes. You have FULL ACCESS to their complete database including all contacts, companies, memos, and reminders.
+
+## PORTFOLIO OVERVIEW
 - Total memos: ${stats?.total_memos || 0}
-- Total companies tracked: ${stats?.total_companies || 0}
-- Active deals: ${stats?.active_deals || 0}
-- Pending tasks: ${stats?.pending_tasks || 0}
+- Total companies tracked: ${companies.length}
+- Total contacts: ${contacts.length}
+- Pending reminders: ${reminders.length}
 
-${context ? `Relevant meeting context:\n${context}` : 'No specific meeting context found for this query.'}
+## ALL CONTACTS (${contacts.length} people)
+${contactsContext}
 
-Instructions:
-- Answer questions based on the meeting context provided
-- If you cite information, mention which meeting it came from
-- Be concise and professional
-- If you don't have enough context to answer, say so
-- Help with tasks like summarizing meetings, finding patterns, and tracking follow-ups`
+## ALL COMPANIES (${companies.length} companies)
+${companiesContext}
+
+## PENDING REMINDERS & FOLLOW-UPS (${reminders.length} items)
+${remindersContext}
+
+${memoContext ? `## RELEVANT MEETING NOTES\n${memoContext}` : ''}
+
+## INSTRUCTIONS
+- You have complete visibility into ALL contacts, companies, and reminders listed above
+- When asked about contacts or companies, reference the specific data provided
+- If asked "who should I follow up with" or similar, analyze the contacts and reminders
+- Help identify patterns, suggest follow-ups, and provide insights from the data
+- Be specific - cite names, companies, and dates when relevant
+- Be concise and professional`
 
     // Generate response using Claude
     const { text } = await generateText({
